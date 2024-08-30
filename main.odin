@@ -1,7 +1,9 @@
 package main
 
+import "base:runtime"
 import "core:log"
 import "core:mem"
+import "core:strings"
 import "vendor:sdl2"
 import vk "vendor:vulkan"
 
@@ -9,9 +11,13 @@ WINDOW_TITLE :: "Vulkan SDL"
 VIEW_WIDTH :: 640
 VIEW_HEIGHT :: 480
 WINDOW_FLAGS :: sdl2.WindowFlags{.SHOWN, .ALLOW_HIGHDPI, .VULKAN}
+ENABLE_VALIDATION_LAYERS :: ODIN_DEBUG
+
+validationLayers := [?]cstring{"VK_LAYER_KHRONOS_validation"}
 
 CTX :: struct {
-	window: ^sdl2.Window,
+	window:         ^sdl2.Window,
+	vulkanInstance: vk.Instance,
 }
 
 ctx := CTX{}
@@ -48,16 +54,40 @@ init_window :: proc() -> bool {
 	return true
 }
 
-slice_to_multi_ptr :: proc(slice: []$T) -> [^]T {
-	return cast([^]T)raw_data(slice)
-}
-
-init_vulkan :: proc() -> (instance: vk.Instance) {
+init_vulkan :: proc(instance: ^vk.Instance) -> bool {
 	getInstanceProcAddr := sdl2.Vulkan_GetVkGetInstanceProcAddr()
 	assert(getInstanceProcAddr != nil)
 
 	vk.load_proc_addresses_global(getInstanceProcAddr)
 	assert(vk.CreateInstance != nil)
+
+	check_validation_layer_support :: proc() -> bool {
+		layerCount: u32
+		vk.EnumerateInstanceLayerProperties(&layerCount, nil)
+		availableLayers := make([dynamic]vk.LayerProperties, layerCount)
+		defer delete(availableLayers)
+		vk.EnumerateInstanceLayerProperties(&layerCount, &availableLayers[0])
+
+		for layer in validationLayers {
+			layerFound := false
+
+			for &layerProperties in availableLayers {
+				if runtime.cstring_cmp(layer, cast(cstring)&layerProperties.layerName[0]) == 0 {
+					layerFound = true
+					break
+				}
+			}
+
+			if !layerFound do return false
+		}
+
+		return true
+	}
+
+	if (ENABLE_VALIDATION_LAYERS && !check_validation_layer_support()) {
+		log.error("Validation layers requested, but not available!")
+		return false
+	}
 
 	appInfo := vk.ApplicationInfo{}
 	appInfo.sType = .APPLICATION_INFO
@@ -68,34 +98,47 @@ init_vulkan :: proc() -> (instance: vk.Instance) {
 	appInfo.apiVersion = vk.API_VERSION_1_3
 
 	extensionCount: u32
+
 	sdl2.Vulkan_GetInstanceExtensions(ctx.window, &extensionCount, nil)
-	//extensionNames := make([^]cstring, extensionCount
 	extensionNames := make([dynamic]cstring, extensionCount)
+	defer delete(extensionNames)
 	sdl2.Vulkan_GetInstanceExtensions(ctx.window, &extensionCount, &extensionNames[0])
+
+	when ODIN_DEBUG {
+		vk.EnumerateInstanceExtensionProperties(nil, &extensionCount, nil)
+		supportedExtensions := make([dynamic]vk.ExtensionProperties, extensionCount)
+		defer delete(supportedExtensions)
+		vk.EnumerateInstanceExtensionProperties(nil, &extensionCount, &supportedExtensions[0])
+		log.infof("Available extensions:")
+		for &extension, i in supportedExtensions {
+			log.infof("%v:\t%s", i + 1, extension.extensionName)
+		}
+	}
 
 	createInfo := vk.InstanceCreateInfo{}
 	createInfo.sType = vk.StructureType.INSTANCE_CREATE_INFO
 	createInfo.pApplicationInfo = &appInfo
 	createInfo.enabledLayerCount = 0
-	createInfo.enabledExtensionCount = extensionCount
+	createInfo.enabledExtensionCount = cast(u32)len(extensionNames)
 	createInfo.ppEnabledExtensionNames = &extensionNames[0]
-	log.warn(extensionNames)
 
-	log.warn(extensionNames[0])
-	log.warn(extensionNames[1])
-	log.warn(createInfo)
-
-	res := vk.CreateInstance(&createInfo, nil, &instance)
-	if res != vk.Result.SUCCESS {
-		log.error("Failed to create Vulkan instance")
+	if (ENABLE_VALIDATION_LAYERS) {
+		createInfo.enabledLayerCount = len(validationLayers)
+		createInfo.ppEnabledLayerNames = &validationLayers[0]
+	} else {
+		createInfo.enabledLayerCount = 0
 	}
 
-	return
-}
+	res := vk.CreateInstance(&createInfo, nil, instance)
+	if res != vk.Result.SUCCESS {
+		log.error("Failed to create Vulkan instance", res)
+		return false
+	}
 
-cleanup :: proc() {
-	sdl2.DestroyWindow(ctx.window)
-	sdl2.Quit()
+	// Load the rest of the vulkan functions
+	vk.load_proc_addresses_instance(instance^)
+
+	return true
 }
 
 main :: proc() {
@@ -119,11 +162,10 @@ main :: proc() {
 	defer reset_tracking_allocator(&trackingAllocator)
 
 	init_window()
-	init_vulkan()
+	init_vulkan(&ctx.vulkanInstance)
 
 	shouldClose := false
 	for !shouldClose {
-
 		// Main loop
 		e: sdl2.Event
 
@@ -135,5 +177,7 @@ main :: proc() {
 		}
 	}
 
-	cleanup()
+	vk.DestroyInstance(ctx.vulkanInstance, nil)
+	sdl2.DestroyWindow(ctx.window)
+	sdl2.Quit()
 }
