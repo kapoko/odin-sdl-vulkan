@@ -19,14 +19,15 @@ validationLayers := [?]cstring{"VK_LAYER_KHRONOS_validation"}
 
 QueueFamilyIndices :: struct {
     graphicsFamily: Maybe(u32),
+    presentFamily:  Maybe(u32),
 }
 
 VulkanHandles :: struct {
-    instance:       vk.Instance,
-    debugMessenger: vk.DebugUtilsMessengerEXT,
-    device:         vk.Device,
-    graphicsQueue:  vk.Queue,
-    surface:        vk.SurfaceKHR,
+    instance:                    vk.Instance,
+    debugMessenger:              vk.DebugUtilsMessengerEXT,
+    device:                      vk.Device,
+    graphicsQueue, presentQueue: vk.Queue,
+    surface:                     vk.SurfaceKHR,
 }
 
 CTX :: struct {
@@ -35,6 +36,10 @@ CTX :: struct {
 }
 
 ctx := CTX{}
+
+is_queue_family_complete :: proc(q: QueueFamilyIndices) -> bool {
+    return q.graphicsFamily != nil && q.presentFamily != nil
+}
 
 init_window :: proc() -> (window: ^sdl2.Window, ok: bool) {
     if sdl_res := sdl2.Init(sdl2.INIT_VIDEO); sdl_res < 0 {
@@ -101,6 +106,10 @@ check_validation_layer_support :: proc() -> bool {
 populate_debug_create_info :: proc(
     createInfo: ^vk.DebugUtilsMessengerCreateInfoEXT,
 ) -> ^vk.DebugUtilsMessengerCreateInfoEXT {
+    createInfo.sType = .DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT
+    createInfo.messageSeverity = {.WARNING, .ERROR}
+    createInfo.messageType = {.GENERAL, .VALIDATION, .PERFORMANCE}
+
     debug_callback :: proc "system" (
         messageSeverity: vk.DebugUtilsMessageSeverityFlagsEXT,
         messageTypes: vk.DebugUtilsMessageTypeFlagsEXT,
@@ -127,9 +136,6 @@ populate_debug_create_info :: proc(
         return false
     }
 
-    createInfo.sType = .DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT
-    createInfo.messageSeverity = {.WARNING, .ERROR}
-    createInfo.messageType = {.GENERAL, .VALIDATION, .PERFORMANCE}
     createInfo.pfnUserCallback = debug_callback
 
     return createInfo
@@ -219,7 +225,12 @@ setup_debug_messenger :: proc(
     return true
 }
 
-find_queue_families :: proc(device: vk.PhysicalDevice) -> (indices: QueueFamilyIndices) {
+find_queue_families :: proc(
+    device: vk.PhysicalDevice,
+    surface: vk.SurfaceKHR,
+) -> (
+    indices: QueueFamilyIndices,
+) {
     queueFamilyCount: u32 = 0
 
     vk.GetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, nil)
@@ -235,6 +246,16 @@ find_queue_families :: proc(device: vk.PhysicalDevice) -> (indices: QueueFamilyI
     for queueFamily, i in queueFamilies {
         if (vk.QueueFlag.GRAPHICS in queueFamily.queueFlags) {
             indices.graphicsFamily = cast(u32)i
+        }
+
+        presentSupport: b32 = false
+        vk.GetPhysicalDeviceSurfaceSupportKHR(device, cast(u32)i, surface, &presentSupport)
+
+        if (presentSupport) {
+            indices.presentFamily = cast(u32)i
+        }
+
+        if is_queue_family_complete(indices) {
             break
         }
     }
@@ -258,13 +279,14 @@ create_surface :: proc(
 }
 
 pick_physical_device :: proc(
-    instance: ^vk.Instance,
+    instance: vk.Instance,
+    surface: vk.SurfaceKHR,
 ) -> (
     physicalDevice: vk.PhysicalDevice,
     ok: bool,
 ) {
     deviceCount: u32 = 0
-    vk.EnumeratePhysicalDevices(instance^, &deviceCount, nil)
+    vk.EnumeratePhysicalDevices(instance, &deviceCount, nil)
 
     if deviceCount == 0 {
         log.error("Failed to find GPUs with Vulkan support")
@@ -273,16 +295,21 @@ pick_physical_device :: proc(
 
     devices := make([dynamic]vk.PhysicalDevice, deviceCount)
     defer delete(devices)
-    vk.EnumeratePhysicalDevices(instance^, &deviceCount, &devices[0])
+    vk.EnumeratePhysicalDevices(instance, &deviceCount, &devices[0])
 
-    isDeviceSuitable :: proc(device: vk.PhysicalDevice) -> (isSuitable: bool) {
+    isDeviceSuitable :: proc(
+        device: vk.PhysicalDevice,
+        surface: vk.SurfaceKHR,
+    ) -> (
+        isSuitable: bool,
+    ) {
         deviceProperties := vk.PhysicalDeviceProperties{}
         deviceFeatures := vk.PhysicalDeviceFeatures{}
         vk.GetPhysicalDeviceProperties(device, &deviceProperties)
         vk.GetPhysicalDeviceFeatures(device, &deviceFeatures)
 
-        indices: QueueFamilyIndices = find_queue_families(device)
-        isSuitable = indices.graphicsFamily != nil
+        indices: QueueFamilyIndices = find_queue_families(device, surface)
+        isSuitable = is_queue_family_complete(indices)
 
         if isSuitable && ODIN_DEBUG {
             log.infof("Found suitable device: %s", deviceProperties.deviceName)
@@ -292,7 +319,7 @@ pick_physical_device :: proc(
     }
 
     for device in devices {
-        if (isDeviceSuitable(device)) {
+        if (isDeviceSuitable(device, surface)) {
             physicalDevice = device
         }
     }
@@ -308,25 +335,40 @@ pick_physical_device :: proc(
 
 create_logical_device :: proc(
     physicalDevice: vk.PhysicalDevice,
+    surface: vk.SurfaceKHR,
 ) -> (
     device: vk.Device,
     graphicsQueue: vk.Queue,
+    presentQueue: vk.Queue,
     ok: bool,
 ) {
-    indices: QueueFamilyIndices = find_queue_families(physicalDevice)
+    indices: QueueFamilyIndices = find_queue_families(physicalDevice, surface)
+    queueFamilies := [?]u32{indices.graphicsFamily.(u32), indices.presentFamily.(u32)}
+    uniqueQueueFamilies := make(map[u32]bool)
+    defer delete(uniqueQueueFamilies)
 
-    queueCreateInfo := vk.DeviceQueueCreateInfo{}
-    queueCreateInfo.sType = vk.StructureType.DEVICE_QUEUE_CREATE_INFO
-    queueCreateInfo.queueFamilyIndex = indices.graphicsFamily.(u32)
-    queueCreateInfo.queueCount = 1
+    for i in queueFamilies {
+        uniqueQueueFamilies[i] = true
+    }
+
+    queueCreateInfos := make([dynamic]vk.DeviceQueueCreateInfo)
+    defer delete(queueCreateInfos)
     queuePriority: f32 = 1.0
-    queueCreateInfo.pQueuePriorities = &queuePriority
+    for queueFamily in uniqueQueueFamilies {
+        queueCreateInfo := vk.DeviceQueueCreateInfo{}
+        queueCreateInfo.sType = vk.StructureType.DEVICE_QUEUE_CREATE_INFO
+        queueCreateInfo.queueFamilyIndex = indices.graphicsFamily.(u32)
+        queueCreateInfo.queueCount = 1
+        queueCreateInfo.pQueuePriorities = &queuePriority
+        append(&queueCreateInfos, queueCreateInfo)
+    }
+
 
     deviceFeatures := vk.PhysicalDeviceFeatures{} // Empty for now
     createInfo := vk.DeviceCreateInfo{}
     createInfo.sType = vk.StructureType.DEVICE_CREATE_INFO
-    createInfo.pQueueCreateInfos = &queueCreateInfo
-    createInfo.queueCreateInfoCount = 1
+    createInfo.pQueueCreateInfos = &queueCreateInfos[0]
+    createInfo.queueCreateInfoCount = cast(u32)len(queueCreateInfos)
     createInfo.pEnabledFeatures = &deviceFeatures
     createInfo.enabledLayerCount = 0
 
@@ -371,8 +413,10 @@ create_logical_device :: proc(
     }
 
     vk.GetDeviceQueue(device, indices.graphicsFamily.(u32), 0, &graphicsQueue)
+    vk.GetDeviceQueue(device, indices.presentFamily.(u32), 0, &presentQueue)
 
-    return device, graphicsQueue, true
+    ok = true
+    return
 }
 
 init_vulkan :: proc(window: ^sdl2.Window) -> (handles: VulkanHandles, ok: bool) {
@@ -386,8 +430,11 @@ init_vulkan :: proc(window: ^sdl2.Window) -> (handles: VulkanHandles, ok: bool) 
     create_vulkan_instance(&handles.instance) or_return
     setup_debug_messenger(&handles.instance, &handles.debugMessenger) or_return
     handles.surface = create_surface(window, handles.instance) or_return
-    physicalDevice := pick_physical_device(&handles.instance) or_return
-    handles.device, handles.graphicsQueue = create_logical_device(physicalDevice) or_return
+    physicalDevice := pick_physical_device(handles.instance, handles.surface) or_return
+    handles.device, handles.graphicsQueue, handles.presentQueue = create_logical_device(
+        physicalDevice,
+        handles.surface,
+    ) or_return
 
     return handles, true
 }
@@ -431,7 +478,7 @@ main :: proc() {
             case .QUIT:
                 shouldClose = true
             case .KEYDOWN:
-                if e.key.keysym.sym == .ESCAPE do shouldClose=true
+                if e.key.keysym.sym == .ESCAPE do shouldClose = true
             }
         }
     }
