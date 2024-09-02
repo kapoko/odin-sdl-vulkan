@@ -25,6 +25,8 @@ VulkanHandles :: struct {
     instance:       vk.Instance,
     debugMessenger: vk.DebugUtilsMessengerEXT,
     device:         vk.Device,
+    graphicsQueue:  vk.Queue,
+    surface:        vk.SurfaceKHR,
 }
 
 CTX :: struct {
@@ -34,22 +36,22 @@ CTX :: struct {
 
 ctx := CTX{}
 
-init_window :: proc() -> bool {
+init_window :: proc() -> (window: ^sdl2.Window, ok: bool) {
     if sdl_res := sdl2.Init(sdl2.INIT_VIDEO); sdl_res < 0 {
         log.errorf("sdl2.init returned %v.", sdl_res)
-        return false
+        return
     }
 
     bounds := sdl2.Rect{}
     if e := sdl2.GetDisplayBounds(0, &bounds); e != 0 {
         log.errorf("Unable to get desktop bounds.")
-        return false
+        return
     }
 
     windowX: i32 = ((bounds.w - bounds.x) / 2) - i32(VIEW_WIDTH / 2) + bounds.x
     windowY: i32 = ((bounds.h - bounds.y) / 2) - i32(VIEW_HEIGHT / 2) + bounds.y
 
-    ctx.window = sdl2.CreateWindow(
+    window = sdl2.CreateWindow(
         WINDOW_TITLE,
         windowX,
         windowY,
@@ -58,12 +60,12 @@ init_window :: proc() -> bool {
         WINDOW_FLAGS,
     )
 
-    if ctx.window == nil {
+    if window == nil {
         log.errorf("sdl2.CreateWindow failed.")
-        return false
+        return
     }
 
-    return true
+    return window, true
 }
 
 check_validation_layer_support :: proc() -> bool {
@@ -134,12 +136,6 @@ populate_debug_create_info :: proc(
 }
 
 create_vulkan_instance :: proc(instance: ^vk.Instance) -> bool {
-    // Load addresses of vulkan addresses
-    getInstanceProcAddr := sdl2.Vulkan_GetVkGetInstanceProcAddr()
-    assert(getInstanceProcAddr != nil)
-    vk.load_proc_addresses_global(getInstanceProcAddr)
-    assert(vk.CreateInstance != nil)
-
     if (ENABLE_VALIDATION_LAYERS && !check_validation_layer_support()) {
         log.error("Validation layers requested, but not available")
     }
@@ -159,7 +155,6 @@ create_vulkan_instance :: proc(instance: ^vk.Instance) -> bool {
     defer delete(extensionNames)
     sdl2.Vulkan_GetInstanceExtensions(ctx.window, &extensionCount, &extensionNames[0])
     //append(&extensionNames, vk.KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME)
-
     if (ENABLE_VALIDATION_LAYERS) {
         append(&extensionNames, vk.EXT_DEBUG_UTILS_EXTENSION_NAME)
     }
@@ -247,6 +242,21 @@ find_queue_families :: proc(device: vk.PhysicalDevice) -> (indices: QueueFamilyI
     return
 }
 
+create_surface :: proc(
+    window: ^sdl2.Window,
+    instance: vk.Instance,
+) -> (
+    surface: vk.SurfaceKHR,
+    ok: bool,
+) {
+    if !sdl2.Vulkan_CreateSurface(window, instance, &surface) {
+        log.error("Failed to create window surface")
+        return
+    }
+
+    return surface, true
+}
+
 pick_physical_device :: proc(
     instance: ^vk.Instance,
 ) -> (
@@ -296,7 +306,13 @@ pick_physical_device :: proc(
     return
 }
 
-create_logical_device :: proc(physicalDevice: vk.PhysicalDevice) -> (device: vk.Device, ok: bool) {
+create_logical_device :: proc(
+    physicalDevice: vk.PhysicalDevice,
+) -> (
+    device: vk.Device,
+    graphicsQueue: vk.Queue,
+    ok: bool,
+) {
     indices: QueueFamilyIndices = find_queue_families(physicalDevice)
 
     queueCreateInfo := vk.DeviceQueueCreateInfo{}
@@ -354,14 +370,24 @@ create_logical_device :: proc(physicalDevice: vk.PhysicalDevice) -> (device: vk.
         log.error("Failed to create logical device")
     }
 
-    return device, true
+    vk.GetDeviceQueue(device, indices.graphicsFamily.(u32), 0, &graphicsQueue)
+
+    return device, graphicsQueue, true
 }
 
-init_vulkan :: proc() -> (handles: VulkanHandles, ok: bool) {
+init_vulkan :: proc(window: ^sdl2.Window) -> (handles: VulkanHandles, ok: bool) {
+    // Load addresses of vulkan addresses
+    getInstanceProcAddr := sdl2.Vulkan_GetVkGetInstanceProcAddr()
+    assert(getInstanceProcAddr != nil)
+    vk.load_proc_addresses_global(getInstanceProcAddr)
+    assert(vk.CreateInstance != nil)
+
+    // Here we go
     create_vulkan_instance(&handles.instance) or_return
     setup_debug_messenger(&handles.instance, &handles.debugMessenger) or_return
+    handles.surface = create_surface(window, handles.instance) or_return
     physicalDevice := pick_physical_device(&handles.instance) or_return
-    handles.device = create_logical_device(physicalDevice) or_return
+    handles.device, handles.graphicsQueue = create_logical_device(physicalDevice) or_return
 
     return handles, true
 }
@@ -386,10 +412,12 @@ main :: proc() {
     }
     defer reset_tracking_allocator(&trackingAllocator)
 
-    init_window()
     ok: bool
-    if ctx.vulkanHandles, ok = init_vulkan(); !ok {
-        log.error()
+    if ctx.window, ok = init_window(); !ok {
+        os.exit(1)
+    }
+
+    if ctx.vulkanHandles, ok = init_vulkan(ctx.window); !ok {
         os.exit(1)
     }
 
@@ -402,6 +430,8 @@ main :: proc() {
             #partial switch (e.type) {
             case .QUIT:
                 shouldClose = true
+            case .KEYDOWN:
+                if e.key.keysym.sym == .ESCAPE do shouldClose=true
             }
         }
     }
@@ -411,6 +441,7 @@ main :: proc() {
     }
 
     vk.DestroyDevice(ctx.device, nil)
+    vk.DestroySurfaceKHR(ctx.instance, ctx.surface, nil)
     vk.DestroyInstance(ctx.instance, nil)
     sdl2.DestroyWindow(ctx.window)
     sdl2.Quit()
