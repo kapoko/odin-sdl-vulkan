@@ -66,6 +66,7 @@ check_validation_layer_support :: proc() -> bool {
         log.error("No validation layers available.")
         return false
     }
+
     availableLayers := make([dynamic]vk.LayerProperties, layerCount)
     defer delete(availableLayers)
     vk.EnumerateInstanceLayerProperties(&layerCount, &availableLayers[0])
@@ -172,7 +173,6 @@ create_vulkan_instance :: proc(instance: ^vk.Instance) -> bool {
     createInfo.ppEnabledExtensionNames = &extensionNames[0]
     createInfo.flags |= {.ENUMERATE_PORTABILITY_KHR}
 
-
     if (ENABLE_VALIDATION_LAYERS) {
         createInfo.enabledLayerCount = len(validationLayers)
         createInfo.ppEnabledLayerNames = &validationLayers[0]
@@ -214,9 +214,48 @@ setup_debug_messenger :: proc(
     return true
 }
 
+pick_physical_device :: proc(instance: ^vk.Instance) -> bool {
+    physicalDevice: vk.PhysicalDevice = nil
+
+    deviceCount: u32 = 0
+    vk.EnumeratePhysicalDevices(instance^, &deviceCount, nil)
+
+    if deviceCount == 0 {
+        log.error("Failed to find GPUs with Vulkan support")
+        return false
+    }
+
+    devices := make([dynamic]vk.PhysicalDevice, deviceCount)
+    vk.EnumeratePhysicalDevices(instance^, &deviceCount, &devices[0])
+
+    isDeviceSuitable :: proc(device: vk.PhysicalDevice) -> bool {
+        deviceProperties := vk.PhysicalDeviceProperties{}
+        deviceFeatures := vk.PhysicalDeviceFeatures{}
+        vk.GetPhysicalDeviceProperties(device, &deviceProperties)
+        vk.GetPhysicalDeviceFeatures(device, &deviceFeatures)
+
+        // Could check features, but support is all we need for now
+        return true
+    }
+
+    for device in devices {
+        if (isDeviceSuitable(device)) {
+            physicalDevice = device
+        }
+    }
+
+    if (physicalDevice == nil) {
+        log.error("Failed to find a suitable GPU!")
+        return false
+    }
+
+    return true
+}
+
 init_vulkan :: proc(instance: ^vk.Instance, debugMessenger: ^vk.DebugUtilsMessengerEXT) -> bool {
     create_vulkan_instance(instance) or_return
     setup_debug_messenger(instance, debugMessenger) or_return
+    pick_physical_device(instance) or_return
 
     return true
 }
