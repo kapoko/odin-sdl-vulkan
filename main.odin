@@ -56,46 +56,20 @@ init_window :: proc() -> bool {
     return true
 }
 
-debug_callback: vk.ProcDebugUtilsMessengerCallbackEXT : proc "system" (
-    messageSeverity: vk.DebugUtilsMessageSeverityFlagsEXT,
-    messageTypes: vk.DebugUtilsMessageTypeFlagsEXT,
-    pCallbackData: ^vk.DebugUtilsMessengerCallbackDataEXT,
-    pUserData: rawptr,
-) -> b32 {
-    context = runtime.default_context()
-    context.logger = log.create_console_logger()
-
-    level: runtime.Logger_Level
-
-    switch {
-    case .ERROR in messageSeverity:
-        level = .Error
-    case .WARNING in messageSeverity:
-        level = .Warning
-    case .VERBOSE in messageSeverity:
-        level = .Debug
-    case:
-        level = .Info
+check_validation_layer_support :: proc() -> bool {
+    layerCount: u32
+    if res := vk.EnumerateInstanceLayerProperties(&layerCount, nil); res != .SUCCESS {
+        log.error("Failed to enumerate validation layers")
     }
 
-    log.logf(level, "Validation layer: %v", pCallbackData.pMessage)
-    return false
-}
-
-init_vulkan :: proc(instance: ^vk.Instance, debugMessenger: ^vk.DebugUtilsMessengerEXT) -> bool {
-    // Load addresses of vulkan addresses
-    getInstanceProcAddr := sdl2.Vulkan_GetVkGetInstanceProcAddr()
-    assert(getInstanceProcAddr != nil)
-    vk.load_proc_addresses_global(getInstanceProcAddr)
-    assert(vk.CreateInstance != nil)
-
-    layerCount: u32
-    vk.EnumerateInstanceLayerProperties(&layerCount, nil)
+    if layerCount == 0 {
+        log.error("No validation layers available.")
+        return false
+    }
     availableLayers := make([dynamic]vk.LayerProperties, layerCount)
     defer delete(availableLayers)
     vk.EnumerateInstanceLayerProperties(&layerCount, &availableLayers[0])
 
-    missingLayers := false
     for layer in validationLayers {
         layerFound := false
         for &layerProperties in availableLayers {
@@ -105,12 +79,58 @@ init_vulkan :: proc(instance: ^vk.Instance, debugMessenger: ^vk.DebugUtilsMessen
             }
         }
 
-        if !layerFound do missingLayers = true
+        if !layerFound do return false
     }
 
-    if (ENABLE_VALIDATION_LAYERS && missingLayers) {
-        log.error("Validation layers requested, but not available!")
+    return true
+}
+
+populate_debug_create_info :: proc(
+    createInfo: ^vk.DebugUtilsMessengerCreateInfoEXT,
+) -> ^vk.DebugUtilsMessengerCreateInfoEXT {
+    debug_callback :: proc "system" (
+        messageSeverity: vk.DebugUtilsMessageSeverityFlagsEXT,
+        messageTypes: vk.DebugUtilsMessageTypeFlagsEXT,
+        pCallbackData: ^vk.DebugUtilsMessengerCallbackDataEXT,
+        pUserData: rawptr,
+    ) -> b32 {
+        context = runtime.default_context()
+        context.logger = log.create_console_logger()
+
+        level: runtime.Logger_Level
+
+        switch {
+        case .ERROR in messageSeverity:
+            level = .Error
+        case .WARNING in messageSeverity:
+            level = .Warning
+        case .VERBOSE in messageSeverity:
+            level = .Debug
+        case:
+            level = .Info
+        }
+
+        log.logf(level, "Validation layer: %v", pCallbackData.pMessage)
         return false
+    }
+
+    createInfo.sType = .DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT
+    createInfo.messageSeverity = {.VERBOSE | .WARNING | .ERROR | .INFO}
+    createInfo.messageType = {.GENERAL, .VALIDATION, .PERFORMANCE}
+    createInfo.pfnUserCallback = debug_callback
+
+    return createInfo
+}
+
+create_vulkan_instance :: proc(instance: ^vk.Instance) -> bool {
+    // Load addresses of vulkan addresses
+    getInstanceProcAddr := sdl2.Vulkan_GetVkGetInstanceProcAddr()
+    assert(getInstanceProcAddr != nil)
+    vk.load_proc_addresses_global(getInstanceProcAddr)
+    assert(vk.CreateInstance != nil)
+
+    if (ENABLE_VALIDATION_LAYERS && !check_validation_layer_support()) {
+        log.error("Validation layers requested, but not available")
     }
 
     appInfo := vk.ApplicationInfo{}
@@ -127,6 +147,7 @@ init_vulkan :: proc(instance: ^vk.Instance, debugMessenger: ^vk.DebugUtilsMessen
     extensionNames := make([dynamic]cstring, extensionCount)
     defer delete(extensionNames)
     sdl2.Vulkan_GetInstanceExtensions(ctx.window, &extensionCount, &extensionNames[0])
+    append(&extensionNames, vk.KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME)
 
     if (ENABLE_VALIDATION_LAYERS) {
         append(&extensionNames, vk.EXT_DEBUG_UTILS_EXTENSION_NAME)
@@ -149,18 +170,14 @@ init_vulkan :: proc(instance: ^vk.Instance, debugMessenger: ^vk.DebugUtilsMessen
     createInfo.enabledLayerCount = 0
     createInfo.enabledExtensionCount = cast(u32)len(extensionNames)
     createInfo.ppEnabledExtensionNames = &extensionNames[0]
+    createInfo.flags |= {.ENUMERATE_PORTABILITY_KHR}
 
-    debugCreateInfo := vk.DebugUtilsMessengerCreateInfoEXT{}
-    debugCreateInfo.sType = .DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT
-    debugCreateInfo.messageSeverity = {.VERBOSE | .WARNING | .ERROR | .INFO}
-    debugCreateInfo.messageType = {.GENERAL, .VALIDATION, .PERFORMANCE}
-    debugCreateInfo.pfnUserCallback = debug_callback
 
     if (ENABLE_VALIDATION_LAYERS) {
         createInfo.enabledLayerCount = len(validationLayers)
         createInfo.ppEnabledLayerNames = &validationLayers[0]
-
-        createInfo.pNext = auto_cast &debugCreateInfo
+        debugCreateInfo := vk.DebugUtilsMessengerCreateInfoEXT{}
+        createInfo.pNext = populate_debug_create_info(&debugCreateInfo)
     }
 
     res := vk.CreateInstance(&createInfo, nil, instance)
@@ -172,14 +189,34 @@ init_vulkan :: proc(instance: ^vk.Instance, debugMessenger: ^vk.DebugUtilsMessen
     // Load the rest of the vulkan functions
     vk.load_proc_addresses_instance(instance^)
 
+    return true
+}
+
+setup_debug_messenger :: proc(
+    instance: ^vk.Instance,
+    debugMessenger: ^vk.DebugUtilsMessengerEXT,
+) -> bool {
     // Setup debug messenger
     if ENABLE_VALIDATION_LAYERS {
-        if vk.CreateDebugUtilsMessengerEXT(instance^, &debugCreateInfo, nil, debugMessenger) !=
+        debugCreateInfo := vk.DebugUtilsMessengerCreateInfoEXT{}
+        if vk.CreateDebugUtilsMessengerEXT(
+               instance^,
+               populate_debug_create_info(&debugCreateInfo),
+               nil,
+               debugMessenger,
+           ) !=
            .SUCCESS {
             log.error("Failed to setup debug messenger.")
             return false
         }
     }
+
+    return true
+}
+
+init_vulkan :: proc(instance: ^vk.Instance, debugMessenger: ^vk.DebugUtilsMessengerEXT) -> bool {
+    create_vulkan_instance(instance) or_return
+    setup_debug_messenger(instance, debugMessenger) or_return
 
     return true
 }
