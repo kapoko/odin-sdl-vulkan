@@ -126,7 +126,7 @@ populate_debug_create_info :: proc(
     }
 
     createInfo.sType = .DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT
-    createInfo.messageSeverity = {.VERBOSE | .WARNING | .ERROR | .INFO}
+    createInfo.messageSeverity = {.WARNING, .ERROR}
     createInfo.messageType = {.GENERAL, .VALIDATION, .PERFORMANCE}
     createInfo.pfnUserCallback = debug_callback
 
@@ -158,7 +158,7 @@ create_vulkan_instance :: proc(instance: ^vk.Instance) -> bool {
     extensionNames := make([dynamic]cstring, extensionCount)
     defer delete(extensionNames)
     sdl2.Vulkan_GetInstanceExtensions(ctx.window, &extensionCount, &extensionNames[0])
-    append(&extensionNames, vk.KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME)
+    //append(&extensionNames, vk.KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME)
 
     if (ENABLE_VALIDATION_LAYERS) {
         append(&extensionNames, vk.EXT_DEBUG_UTILS_EXTENSION_NAME)
@@ -181,10 +181,10 @@ create_vulkan_instance :: proc(instance: ^vk.Instance) -> bool {
     createInfo.enabledLayerCount = 0
     createInfo.enabledExtensionCount = cast(u32)len(extensionNames)
     createInfo.ppEnabledExtensionNames = &extensionNames[0]
-    createInfo.flags |= {.ENUMERATE_PORTABILITY_KHR}
 
     if (ENABLE_VALIDATION_LAYERS) {
-        createInfo.enabledLayerCount = len(validationLayers)
+        //createInfo.flags = {vk.InstanceCreateFlag.ENUMERATE_PORTABILITY_KHR}
+        createInfo.enabledLayerCount = cast(u32)len(validationLayers)
         createInfo.ppEnabledLayerNames = &validationLayers[0]
         debugCreateInfo := vk.DebugUtilsMessengerCreateInfoEXT{}
         createInfo.pNext = populate_debug_create_info(&debugCreateInfo)
@@ -192,7 +192,7 @@ create_vulkan_instance :: proc(instance: ^vk.Instance) -> bool {
 
     res := vk.CreateInstance(&createInfo, nil, instance)
     if res != vk.Result.SUCCESS {
-        log.error("Failed to create Vulkan instance", res)
+        log.error("Failed to create Vulkan instance:", res)
         return false
     }
 
@@ -297,6 +297,62 @@ pick_physical_device :: proc(
 }
 
 create_logical_device :: proc(physicalDevice: vk.PhysicalDevice) -> (device: vk.Device, ok: bool) {
+    indices: QueueFamilyIndices = find_queue_families(physicalDevice)
+
+    queueCreateInfo := vk.DeviceQueueCreateInfo{}
+    queueCreateInfo.sType = vk.StructureType.DEVICE_QUEUE_CREATE_INFO
+    queueCreateInfo.queueFamilyIndex = indices.graphicsFamily.(u32)
+    queueCreateInfo.queueCount = 1
+    queuePriority: f32 = 1.0
+    queueCreateInfo.pQueuePriorities = &queuePriority
+
+    deviceFeatures := vk.PhysicalDeviceFeatures{} // Empty for now
+    createInfo := vk.DeviceCreateInfo{}
+    createInfo.sType = vk.StructureType.DEVICE_CREATE_INFO
+    createInfo.pQueueCreateInfos = &queueCreateInfo
+    createInfo.queueCreateInfoCount = 1
+    createInfo.pEnabledFeatures = &deviceFeatures
+    createInfo.enabledLayerCount = 0
+
+    extensionCount: u32 = 0
+    vk.EnumerateDeviceExtensionProperties(physicalDevice, nil, &extensionCount, nil)
+    supportedExtensions := make([dynamic]vk.ExtensionProperties, extensionCount)
+    defer delete(supportedExtensions)
+    vk.EnumerateDeviceExtensionProperties(
+        physicalDevice,
+        nil,
+        &extensionCount,
+        &supportedExtensions[0],
+    )
+
+    extensions := [?]cstring{"VK_KHR_portability_subset"}
+
+    for extension in extensions {
+        extensionFound := false
+        for &supportedExtension in supportedExtensions {
+            if runtime.cstring_cmp(extension, cast(cstring)&supportedExtension.extensionName[0]) ==
+               0 {
+                extensionFound = true
+                break
+            }
+        }
+        if !extensionFound {
+            log.errorf("Device extension not found: %s", extension)
+            return
+        }
+    }
+
+    createInfo.enabledExtensionCount = len(extensions)
+    createInfo.ppEnabledExtensionNames = &extensions[0]
+
+    if (ENABLE_VALIDATION_LAYERS) {
+        createInfo.enabledLayerCount = len(validationLayers)
+        createInfo.ppEnabledLayerNames = &validationLayers[0]
+    }
+
+    if (vk.CreateDevice(physicalDevice, &createInfo, nil, &device) != .SUCCESS) {
+        log.error("Failed to create logical device")
+    }
 
     return device, true
 }
@@ -354,6 +410,7 @@ main :: proc() {
         vk.DestroyDebugUtilsMessengerEXT(ctx.instance, ctx.debugMessenger, nil)
     }
 
+    vk.DestroyDevice(ctx.device, nil)
     vk.DestroyInstance(ctx.instance, nil)
     sdl2.DestroyWindow(ctx.window)
     sdl2.Quit()
