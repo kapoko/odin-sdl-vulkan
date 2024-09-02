@@ -4,6 +4,7 @@ import "base:runtime"
 import "core:fmt"
 import "core:log"
 import "core:mem"
+import "core:os"
 import "core:strings"
 import "vendor:sdl2"
 import vk "vendor:vulkan"
@@ -16,10 +17,19 @@ ENABLE_VALIDATION_LAYERS :: ODIN_DEBUG
 
 validationLayers := [?]cstring{"VK_LAYER_KHRONOS_validation"}
 
-CTX :: struct {
-    window:         ^sdl2.Window,
-    vulkanInstance: vk.Instance,
+QueueFamilyIndices :: struct {
+    graphicsFamily: Maybe(u32),
+}
+
+VulkanHandles :: struct {
+    instance:       vk.Instance,
     debugMessenger: vk.DebugUtilsMessengerEXT,
+    device:         vk.Device,
+}
+
+CTX :: struct {
+    window:              ^sdl2.Window,
+    using vulkanHandles: VulkanHandles,
 }
 
 ctx := CTX{}
@@ -214,28 +224,61 @@ setup_debug_messenger :: proc(
     return true
 }
 
-pick_physical_device :: proc(instance: ^vk.Instance) -> bool {
-    physicalDevice: vk.PhysicalDevice = nil
+find_queue_families :: proc(device: vk.PhysicalDevice) -> (indices: QueueFamilyIndices) {
+    queueFamilyCount: u32 = 0
 
+    vk.GetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, nil)
+
+    if (queueFamilyCount == 0) {
+        log.error("No queue families found")
+        return
+    }
+
+    queueFamilies := make([dynamic]vk.QueueFamilyProperties, queueFamilyCount)
+    defer delete(queueFamilies)
+    vk.GetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, &queueFamilies[0])
+    for queueFamily, i in queueFamilies {
+        if (vk.QueueFlag.GRAPHICS in queueFamily.queueFlags) {
+            indices.graphicsFamily = cast(u32)i
+            break
+        }
+    }
+
+    return
+}
+
+pick_physical_device :: proc(
+    instance: ^vk.Instance,
+) -> (
+    physicalDevice: vk.PhysicalDevice,
+    ok: bool,
+) {
     deviceCount: u32 = 0
     vk.EnumeratePhysicalDevices(instance^, &deviceCount, nil)
 
     if deviceCount == 0 {
         log.error("Failed to find GPUs with Vulkan support")
-        return false
+        return
     }
 
     devices := make([dynamic]vk.PhysicalDevice, deviceCount)
+    defer delete(devices)
     vk.EnumeratePhysicalDevices(instance^, &deviceCount, &devices[0])
 
-    isDeviceSuitable :: proc(device: vk.PhysicalDevice) -> bool {
+    isDeviceSuitable :: proc(device: vk.PhysicalDevice) -> (isSuitable: bool) {
         deviceProperties := vk.PhysicalDeviceProperties{}
         deviceFeatures := vk.PhysicalDeviceFeatures{}
         vk.GetPhysicalDeviceProperties(device, &deviceProperties)
         vk.GetPhysicalDeviceFeatures(device, &deviceFeatures)
 
-        // Could check features, but support is all we need for now
-        return true
+        indices: QueueFamilyIndices = find_queue_families(device)
+        isSuitable = indices.graphicsFamily != nil
+
+        if isSuitable && ODIN_DEBUG {
+            log.infof("Found suitable device: %s", deviceProperties.deviceName)
+        }
+
+        return
     }
 
     for device in devices {
@@ -246,18 +289,25 @@ pick_physical_device :: proc(instance: ^vk.Instance) -> bool {
 
     if (physicalDevice == nil) {
         log.error("Failed to find a suitable GPU!")
-        return false
+        return
     }
 
-    return true
+    ok = true
+    return
 }
 
-init_vulkan :: proc(instance: ^vk.Instance, debugMessenger: ^vk.DebugUtilsMessengerEXT) -> bool {
-    create_vulkan_instance(instance) or_return
-    setup_debug_messenger(instance, debugMessenger) or_return
-    pick_physical_device(instance) or_return
+create_logical_device :: proc(physicalDevice: vk.PhysicalDevice) -> (device: vk.Device, ok: bool) {
 
-    return true
+    return device, true
+}
+
+init_vulkan :: proc() -> (handles: VulkanHandles, ok: bool) {
+    create_vulkan_instance(&handles.instance) or_return
+    setup_debug_messenger(&handles.instance, &handles.debugMessenger) or_return
+    physicalDevice := pick_physical_device(&handles.instance) or_return
+    handles.device = create_logical_device(physicalDevice) or_return
+
+    return handles, true
 }
 
 main :: proc() {
@@ -281,7 +331,11 @@ main :: proc() {
     defer reset_tracking_allocator(&trackingAllocator)
 
     init_window()
-    init_vulkan(&ctx.vulkanInstance, &ctx.debugMessenger)
+    ok: bool
+    if ctx.vulkanHandles, ok = init_vulkan(); !ok {
+        log.error()
+        os.exit(1)
+    }
 
     shouldClose := false
     for !shouldClose {
@@ -297,10 +351,10 @@ main :: proc() {
     }
 
     if ENABLE_VALIDATION_LAYERS {
-        vk.DestroyDebugUtilsMessengerEXT(ctx.vulkanInstance, ctx.debugMessenger, nil)
+        vk.DestroyDebugUtilsMessengerEXT(ctx.instance, ctx.debugMessenger, nil)
     }
 
-    vk.DestroyInstance(ctx.vulkanInstance, nil)
+    vk.DestroyInstance(ctx.instance, nil)
     sdl2.DestroyWindow(ctx.window)
     sdl2.Quit()
 }
