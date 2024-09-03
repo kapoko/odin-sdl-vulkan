@@ -54,6 +54,8 @@ VulkanHandles :: struct {
     surface:                       vk.SurfaceKHR,
     renderPass:                    vk.RenderPass,
     frameBuffers:                  [dynamic]vk.Framebuffer,
+    commandPool:                   vk.CommandPool,
+    commandBuffer:                 vk.CommandBuffer,
     using logicalDeviceHandles:    LogicalDeviceHandles,
     using swapChainHandles:        SwapChainHandles,
     using graphicsPipelineHandles: GraphicsPipelineHandles,
@@ -880,6 +882,49 @@ create_framebuffers :: proc(
     return frameBuffers, true
 }
 
+create_command_pool :: proc(
+    physicalDevice: vk.PhysicalDevice,
+    surface: vk.SurfaceKHR,
+    device: vk.Device,
+) -> (
+    commandPool: vk.CommandPool,
+    ok: bool,
+) {
+    queueFamilyIndices := find_queue_families(physicalDevice, surface)
+
+    poolInfo := vk.CommandPoolCreateInfo{}
+    poolInfo.sType = .COMMAND_POOL_CREATE_INFO
+    poolInfo.flags = {.RESET_COMMAND_BUFFER}
+    poolInfo.queueFamilyIndex = queueFamilyIndices.graphicsFamily.(u32)
+
+    if (vk.CreateCommandPool(device, &poolInfo, nil, &commandPool) != .SUCCESS) {
+        log.error("Failed to create command pool")
+    }
+
+    return commandPool, true
+}
+
+create_command_buffer :: proc(
+    device: vk.Device,
+    commandPool: vk.CommandPool,
+) -> (
+    commandBuffer: vk.CommandBuffer,
+    ok: bool,
+) {
+    allocInfo := vk.CommandBufferAllocateInfo{}
+    allocInfo.sType = .COMMAND_BUFFER_ALLOCATE_INFO
+    allocInfo.commandPool = commandPool
+    allocInfo.level = .PRIMARY
+    allocInfo.commandBufferCount = 1
+
+    if (vk.AllocateCommandBuffers(device, &allocInfo, &commandBuffer) != .SUCCESS) {
+        log.error("Failed to allocate command buffers")
+        return
+    }
+
+    return commandBuffer, true
+}
+
 init_vulkan :: proc(window: ^sdl2.Window) -> (v: VulkanHandles, ok: bool) {
     v.instance = create_vulkan_instance(window) or_return
     v.debugMessenger = setup_debug_messenger(v.instance) or_return
@@ -895,6 +940,8 @@ init_vulkan :: proc(window: ^sdl2.Window) -> (v: VulkanHandles, ok: bool) {
         v.swapChainExtent,
     ) or_return
     v.frameBuffers = create_framebuffers(v.swapChainHandles, v.renderPass, v.device) or_return
+    v.commandPool = create_command_pool(physicalDevice, v.surface, v.device) or_return
+    v.commandBuffer = create_command_buffer(v.device, v.commandPool) or_return
 
     return v, true
 }
@@ -915,6 +962,7 @@ destroy_vulkan :: proc(v: VulkanHandles) {
     delete(v.swapChainImages)
     delete(v.swapChainImageViews)
     delete(v.frameBuffers)
+    vk.DestroyCommandPool(v.device, v.commandPool, nil)
     vk.DestroyPipeline(v.device, v.graphicsPipeline, nil)
     vk.DestroyPipelineLayout(v.device, v.pipelineLayout, nil)
     vk.DestroyRenderPass(v.device, v.renderPass, nil)
