@@ -38,19 +38,24 @@ SwapChainHandles :: struct {
     swapChainExtent:      vk.Extent2D,
 }
 
+GraphicsPipelineHandles :: struct {
+    pipelineLayout:   vk.PipelineLayout,
+    graphicsPipeline: vk.Pipeline,
+}
+
 LogicalDeviceHandles :: struct {
     device:                      vk.Device,
     graphicsQueue, presentQueue: vk.Queue,
 }
 
 VulkanHandles :: struct {
-    instance:                   vk.Instance,
-    debugMessenger:             vk.DebugUtilsMessengerEXT,
-    surface:                    vk.SurfaceKHR,
-    pipelineLayout:             vk.PipelineLayout,
-    renderPass:                 vk.RenderPass,
-    using logicalDeviceHandles: LogicalDeviceHandles,
-    using swapChainHandles:     SwapChainHandles,
+    instance:                      vk.Instance,
+    debugMessenger:                vk.DebugUtilsMessengerEXT,
+    surface:                       vk.SurfaceKHR,
+    renderPass:                    vk.RenderPass,
+    using logicalDeviceHandles:    LogicalDeviceHandles,
+    using swapChainHandles:        SwapChainHandles,
+    using graphicsPipelineHandles: GraphicsPipelineHandles,
 }
 
 CTX :: struct {
@@ -652,11 +657,53 @@ create_shader_module :: proc(
     return shaderModule, true
 }
 
+create_render_pass :: proc(
+    device: vk.Device,
+    swapChainImageFormat: vk.Format,
+) -> (
+    renderPass: vk.RenderPass,
+    ok: bool,
+) {
+    colorAttachment := vk.AttachmentDescription{}
+    colorAttachment.format = swapChainImageFormat
+    colorAttachment.samples = {._1}
+    colorAttachment.loadOp = .CLEAR
+    colorAttachment.storeOp = .STORE
+    colorAttachment.stencilLoadOp = .DONT_CARE
+    colorAttachment.stencilStoreOp = .DONT_CARE
+    colorAttachment.initialLayout = .UNDEFINED
+    colorAttachment.finalLayout = .PRESENT_SRC_KHR
+
+    colorAttachmentRef := vk.AttachmentReference{}
+    colorAttachmentRef.attachment = 0
+    colorAttachmentRef.layout = .COLOR_ATTACHMENT_OPTIMAL
+
+    subpass := vk.SubpassDescription{}
+    subpass.pipelineBindPoint = .GRAPHICS
+    subpass.colorAttachmentCount = 1
+    subpass.pColorAttachments = &colorAttachmentRef
+
+    renderPassInfo := vk.RenderPassCreateInfo{}
+    renderPassInfo.sType = .RENDER_PASS_CREATE_INFO
+    renderPassInfo.attachmentCount = 1
+    renderPassInfo.pAttachments = &colorAttachment
+    renderPassInfo.subpassCount = 1
+    renderPassInfo.pSubpasses = &subpass
+
+    if (vk.CreateRenderPass(device, &renderPassInfo, nil, &renderPass) != .SUCCESS) {
+        log.error("Failed to create render pass")
+        return
+    }
+
+    return renderPass, true
+}
+
 create_graphics_pipeline :: proc(
     device: vk.Device,
+    renderPass: vk.RenderPass,
     swapChainExtent: vk.Extent2D,
 ) -> (
-    pipelineLayout: vk.PipelineLayout,
+    handles: GraphicsPipelineHandles,
     ok: bool,
 ) {
     vertShaderCode := read_file("shaders/vert.spv") or_return
@@ -770,53 +817,35 @@ create_graphics_pipeline :: proc(
     pipelineLayoutInfo.pushConstantRangeCount = 0 // Optional
     pipelineLayoutInfo.pPushConstantRanges = nil // Optional
 
-    if (vk.CreatePipelineLayout(device, &pipelineLayoutInfo, nil, &pipelineLayout) != .SUCCESS) {
+    if (vk.CreatePipelineLayout(device, &pipelineLayoutInfo, nil, &handles.pipelineLayout) !=
+           .SUCCESS) {
         log.error("Failed to create pipeline layout")
         return
     }
 
-    return pipelineLayout, true
-}
+    pipelineInfo := vk.GraphicsPipelineCreateInfo{}
+    pipelineInfo.sType = .GRAPHICS_PIPELINE_CREATE_INFO
+    pipelineInfo.stageCount = 2
+    pipelineInfo.pStages = &shaderStages[0]
+    pipelineInfo.pVertexInputState = &vertexInputInfo
+    pipelineInfo.pInputAssemblyState = &inputAssembly
+    pipelineInfo.pViewportState = &viewportState
+    pipelineInfo.pRasterizationState = &rasterizer
+    pipelineInfo.pMultisampleState = &multisampling
+    pipelineInfo.pDepthStencilState = nil // Optional
+    pipelineInfo.pColorBlendState = &colorBlending
+    pipelineInfo.pDynamicState = &dynamicState
+    pipelineInfo.layout = handles.pipelineLayout
+    pipelineInfo.renderPass = renderPass
+    pipelineInfo.subpass = 0
+    pipelineInfo.basePipelineIndex = -1 // Optional
 
-create_render_pass :: proc(
-    device: vk.Device,
-    swapChainImageFormat: vk.Format,
-) -> (
-    renderPass: vk.RenderPass,
-    ok: bool,
-) {
-    colorAttachment := vk.AttachmentDescription{}
-    colorAttachment.format = swapChainImageFormat
-    colorAttachment.samples = {._1}
-    colorAttachment.loadOp = .CLEAR
-    colorAttachment.storeOp = .STORE
-    colorAttachment.stencilLoadOp = .DONT_CARE
-    colorAttachment.stencilStoreOp = .DONT_CARE
-    colorAttachment.initialLayout = .UNDEFINED
-    colorAttachment.finalLayout = .PRESENT_SRC_KHR
-
-    colorAttachmentRef := vk.AttachmentReference{}
-    colorAttachmentRef.attachment = 0
-    colorAttachmentRef.layout = .COLOR_ATTACHMENT_OPTIMAL
-
-    subpass := vk.SubpassDescription{}
-    subpass.pipelineBindPoint = .GRAPHICS
-    subpass.colorAttachmentCount = 1
-    subpass.pColorAttachments = &colorAttachmentRef
-
-    renderPassInfo := vk.RenderPassCreateInfo{}
-    renderPassInfo.sType = .RENDER_PASS_CREATE_INFO
-    renderPassInfo.attachmentCount = 1
-    renderPassInfo.pAttachments = &colorAttachment
-    renderPassInfo.subpassCount = 1
-    renderPassInfo.pSubpasses = &subpass
-
-    if (vk.CreateRenderPass(device, &renderPassInfo, nil, &renderPass) != .SUCCESS) {
-        log.error("Failed to create render pass")
-        return
+    if (vk.CreateGraphicsPipelines(device, 0, 1, &pipelineInfo, nil, &handles.graphicsPipeline) !=
+           .SUCCESS) {
+        log.error("Failed to create graphics pipeline")
     }
 
-    return renderPass, true
+    return handles, true
 }
 
 init_vulkan :: proc(window: ^sdl2.Window) -> (v: VulkanHandles, ok: bool) {
@@ -828,7 +857,11 @@ init_vulkan :: proc(window: ^sdl2.Window) -> (v: VulkanHandles, ok: bool) {
     v.swapChainHandles = create_swap_chain(window, physicalDevice, v.device, v.surface) or_return
     v.swapChainImageViews = create_image_views(v.device, v.swapChainHandles) or_return
     v.renderPass = create_render_pass(v.device, v.swapChainImageFormat) or_return
-    v.pipelineLayout = create_graphics_pipeline(v.device, v.swapChainExtent) or_return
+    v.graphicsPipelineHandles = create_graphics_pipeline(
+        v.device,
+        v.renderPass,
+        v.swapChainExtent,
+    ) or_return
 
     return v, true
 }
@@ -844,6 +877,7 @@ destroy_vulkan :: proc(v: VulkanHandles) {
 
     delete(v.swapChainImages)
     delete(v.swapChainImageViews)
+    vk.DestroyPipeline(v.device, v.graphicsPipeline, nil)
     vk.DestroyPipelineLayout(v.device, v.pipelineLayout, nil)
     vk.DestroyRenderPass(v.device, v.renderPass, nil)
     vk.DestroySwapchainKHR(v.device, v.swapChain, nil)
