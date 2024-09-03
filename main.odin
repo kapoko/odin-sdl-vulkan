@@ -16,6 +16,7 @@ WINDOW_FLAGS :: sdl2.WindowFlags{.SHOWN, .ALLOW_HIGHDPI, .VULKAN}
 ENABLE_VALIDATION_LAYERS :: ODIN_DEBUG
 
 validationLayers := [?]cstring{"VK_LAYER_KHRONOS_validation"}
+deviceExtensions := [?]cstring{vk.KHR_SWAPCHAIN_EXTENSION_NAME}
 
 QueueFamilyIndices :: struct {
     graphicsFamily: Maybe(u32),
@@ -91,7 +92,7 @@ check_validation_layer_support :: proc() -> bool {
     for layer in validationLayers {
         layerFound := false
         for &layerProperties in availableLayers {
-            if runtime.cstring_cmp(layer, cast(cstring)&layerProperties.layerName[0]) == 0 {
+            if runtime.cstring_eq(layer, cast(cstring)&layerProperties.layerName[0]) {
                 layerFound = true
                 break
             }
@@ -155,28 +156,33 @@ create_vulkan_instance :: proc(instance: ^vk.Instance) -> bool {
     appInfo.apiVersion = vk.API_VERSION_1_3
 
     extensionCount: u32
-
     sdl2.Vulkan_GetInstanceExtensions(ctx.window, &extensionCount, nil)
     extensionNames := make([dynamic]cstring, extensionCount)
     defer delete(extensionNames)
     sdl2.Vulkan_GetInstanceExtensions(ctx.window, &extensionCount, &extensionNames[0])
-    //append(&extensionNames, vk.KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME)
+
     if (ENABLE_VALIDATION_LAYERS) {
         append(&extensionNames, vk.EXT_DEBUG_UTILS_EXTENSION_NAME)
     }
 
-    when ODIN_DEBUG {
-        vk.EnumerateInstanceExtensionProperties(nil, &extensionCount, nil)
-        supportedExtensions := make([dynamic]vk.ExtensionProperties, extensionCount)
-        defer delete(supportedExtensions)
-        vk.EnumerateInstanceExtensionProperties(nil, &extensionCount, &supportedExtensions[0])
-        log.infof("Available extensions:")
-        for &extension, i in supportedExtensions {
-            log.infof("%v:\t%s", i + 1, extension.extensionName)
+    createInfo := vk.InstanceCreateInfo{}
+
+    vk.EnumerateInstanceExtensionProperties(nil, &extensionCount, nil)
+    supportedExtensions := make([dynamic]vk.ExtensionProperties, extensionCount)
+    defer delete(supportedExtensions)
+    vk.EnumerateInstanceExtensionProperties(nil, &extensionCount, &supportedExtensions[0])
+
+    for &extension, i in supportedExtensions {
+        if runtime.cstring_eq(
+            vk.KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME,
+            cast(cstring)&extension.extensionName[0],
+        ) {
+            append(&extensionNames, vk.KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME)
+            createInfo.flags = {vk.InstanceCreateFlag.ENUMERATE_PORTABILITY_KHR}
         }
+        if ODIN_DEBUG do log.infof("%v:\t%s", i + 1, extension.extensionName)
     }
 
-    createInfo := vk.InstanceCreateInfo{}
     createInfo.sType = .INSTANCE_CREATE_INFO
     createInfo.pApplicationInfo = &appInfo
     createInfo.enabledLayerCount = 0
@@ -184,7 +190,6 @@ create_vulkan_instance :: proc(instance: ^vk.Instance) -> bool {
     createInfo.ppEnabledExtensionNames = &extensionNames[0]
 
     if (ENABLE_VALIDATION_LAYERS) {
-        //createInfo.flags = {vk.InstanceCreateFlag.ENUMERATE_PORTABILITY_KHR}
         createInfo.enabledLayerCount = cast(u32)len(validationLayers)
         createInfo.ppEnabledLayerNames = &validationLayers[0]
         debugCreateInfo := vk.DebugUtilsMessengerCreateInfoEXT{}
@@ -278,6 +283,47 @@ create_surface :: proc(
     return surface, true
 }
 
+check_device_extension_support :: proc(device: vk.PhysicalDevice) -> bool {
+    extensionCount: u32
+    vk.EnumerateDeviceExtensionProperties(device, nil, &extensionCount, nil)
+    availableExtensions := make([dynamic]vk.ExtensionProperties, extensionCount)
+    defer delete(availableExtensions)
+    vk.EnumerateDeviceExtensionProperties(device, nil, &extensionCount, &availableExtensions[0])
+
+    found := 0
+    for &availableExtension in availableExtensions {
+        for extension in deviceExtensions {
+            if runtime.cstring_eq(extension, cstring(&availableExtension.extensionName[0])) {
+                found += 1
+            }
+        }
+    }
+
+    return len(deviceExtensions) == found
+}
+
+is_device_suitable :: proc(
+    device: vk.PhysicalDevice,
+    surface: vk.SurfaceKHR,
+) -> (
+    isSuitable: bool,
+) {
+    deviceProperties := vk.PhysicalDeviceProperties{}
+    deviceFeatures := vk.PhysicalDeviceFeatures{}
+    vk.GetPhysicalDeviceProperties(device, &deviceProperties)
+    vk.GetPhysicalDeviceFeatures(device, &deviceFeatures)
+
+    indices: QueueFamilyIndices = find_queue_families(device, surface)
+    extensionsSupported := check_device_extension_support(device)
+    isSuitable = is_queue_family_complete(indices) && extensionsSupported
+
+    if isSuitable && ODIN_DEBUG {
+        log.infof("Found suitable device: %s", deviceProperties.deviceName)
+    }
+
+    return
+}
+
 pick_physical_device :: proc(
     instance: vk.Instance,
     surface: vk.SurfaceKHR,
@@ -297,29 +343,8 @@ pick_physical_device :: proc(
     defer delete(devices)
     vk.EnumeratePhysicalDevices(instance, &deviceCount, &devices[0])
 
-    isDeviceSuitable :: proc(
-        device: vk.PhysicalDevice,
-        surface: vk.SurfaceKHR,
-    ) -> (
-        isSuitable: bool,
-    ) {
-        deviceProperties := vk.PhysicalDeviceProperties{}
-        deviceFeatures := vk.PhysicalDeviceFeatures{}
-        vk.GetPhysicalDeviceProperties(device, &deviceProperties)
-        vk.GetPhysicalDeviceFeatures(device, &deviceFeatures)
-
-        indices: QueueFamilyIndices = find_queue_families(device, surface)
-        isSuitable = is_queue_family_complete(indices)
-
-        if isSuitable && ODIN_DEBUG {
-            log.infof("Found suitable device: %s", deviceProperties.deviceName)
-        }
-
-        return
-    }
-
     for device in devices {
-        if (isDeviceSuitable(device, surface)) {
+        if (is_device_suitable(device, surface)) {
             physicalDevice = device
         }
     }
@@ -388,8 +413,7 @@ create_logical_device :: proc(
     for extension in extensions {
         extensionFound := false
         for &supportedExtension in supportedExtensions {
-            if runtime.cstring_cmp(extension, cast(cstring)&supportedExtension.extensionName[0]) ==
-               0 {
+            if runtime.cstring_eq(extension, cast(cstring)&supportedExtension.extensionName[0]) {
                 extensionFound = true
                 break
             }
