@@ -47,6 +47,7 @@ VulkanHandles :: struct {
     instance:                   vk.Instance,
     debugMessenger:             vk.DebugUtilsMessengerEXT,
     surface:                    vk.SurfaceKHR,
+    pipelineLayout:             vk.PipelineLayout,
     using logicalDeviceHandles: LogicalDeviceHandles,
     using swapChainHandles:     SwapChainHandles,
 }
@@ -639,7 +640,13 @@ create_shader_module :: proc(
     return shaderModule, true
 }
 
-create_graphics_pipeline :: proc(device: vk.Device) -> bool {
+create_graphics_pipeline :: proc(
+    device: vk.Device,
+    swapChainExtent: vk.Extent2D,
+) -> (
+    pipelineLayout: vk.PipelineLayout,
+    ok: bool,
+) {
     vertShaderCode := read_file("shaders/vert.spv") or_return
     fragShaderCode := read_file("shaders/frag.spv") or_return
     defer delete(vertShaderCode)
@@ -647,6 +654,8 @@ create_graphics_pipeline :: proc(device: vk.Device) -> bool {
 
     vertShaderModule := create_shader_module(device, vertShaderCode) or_return
     fragShaderModule := create_shader_module(device, fragShaderCode) or_return
+    defer vk.DestroyShaderModule(device, fragShaderModule, nil)
+    defer vk.DestroyShaderModule(device, vertShaderModule, nil)
 
     vertShaderStageInfo := vk.PipelineShaderStageCreateInfo{}
     vertShaderStageInfo.sType = .PIPELINE_SHADER_STAGE_CREATE_INFO
@@ -662,9 +671,99 @@ create_graphics_pipeline :: proc(device: vk.Device) -> bool {
 
     shaderStages := [?]vk.PipelineShaderStageCreateInfo{vertShaderStageInfo, fragShaderStageInfo}
 
-    vk.DestroyShaderModule(device, fragShaderModule, nil)
-    vk.DestroyShaderModule(device, vertShaderModule, nil)
-    return true
+    dynamicStates := [?]vk.DynamicState{.VIEWPORT, .SCISSOR}
+    dynamicState := vk.PipelineDynamicStateCreateInfo{}
+    dynamicState.sType = .PIPELINE_DYNAMIC_STATE_CREATE_INFO
+    dynamicState.dynamicStateCount = len(dynamicStates)
+    dynamicState.pDynamicStates = &dynamicStates[0]
+
+    vertexInputInfo := vk.PipelineVertexInputStateCreateInfo{}
+    vertexInputInfo.sType = .PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO
+    vertexInputInfo.vertexBindingDescriptionCount = 0
+    vertexInputInfo.pVertexBindingDescriptions = nil // Optional
+    vertexInputInfo.vertexAttributeDescriptionCount = 0
+    vertexInputInfo.pVertexAttributeDescriptions = nil // Optional
+
+    inputAssembly := vk.PipelineInputAssemblyStateCreateInfo{}
+    inputAssembly.sType = .PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO
+    inputAssembly.topology = vk.PrimitiveTopology.TRIANGLE_LIST
+    inputAssembly.primitiveRestartEnable = false
+
+    viewport := vk.Viewport{}
+    viewport.x = 0
+    viewport.y = 0
+    viewport.width = f32(swapChainExtent.width)
+    viewport.height = f32(swapChainExtent.height)
+    viewport.minDepth = 0
+    viewport.maxDepth = 1
+
+    scissor := vk.Rect2D{}
+    scissor.offset = {0, 0}
+    scissor.extent = swapChainExtent
+
+    viewportState := vk.PipelineViewportStateCreateInfo{}
+    viewportState.sType = .PIPELINE_VIEWPORT_STATE_CREATE_INFO
+    viewportState.viewportCount = 1
+    viewportState.pViewports = &viewport
+    viewportState.scissorCount = 1
+    viewportState.pScissors = &scissor
+
+    rasterizer := vk.PipelineRasterizationStateCreateInfo{}
+    rasterizer.sType = .PIPELINE_RASTERIZATION_STATE_CREATE_INFO
+    rasterizer.depthClampEnable = false
+    rasterizer.rasterizerDiscardEnable = false
+    rasterizer.polygonMode = .FILL
+    rasterizer.lineWidth = 1
+    rasterizer.cullMode = {.BACK}
+    rasterizer.frontFace = .CLOCKWISE
+    rasterizer.depthBiasEnable = false
+    rasterizer.depthBiasConstantFactor = 0 // Optional
+    rasterizer.depthBiasClamp = 0 // Optional
+    rasterizer.depthBiasSlopeFactor = 0 // Optional
+
+    multisampling := vk.PipelineMultisampleStateCreateInfo{}
+    multisampling.sType = .PIPELINE_MULTISAMPLE_STATE_CREATE_INFO
+    multisampling.sampleShadingEnable = false
+    multisampling.rasterizationSamples = {._1}
+    multisampling.minSampleShading = 1 // Optional
+    multisampling.pSampleMask = nil // Optional
+    multisampling.alphaToCoverageEnable = false // Optional
+    multisampling.alphaToOneEnable = false // Optional
+
+    colorBlendAttachment := vk.PipelineColorBlendAttachmentState{}
+    colorBlendAttachment.colorWriteMask = {.R, .G, .B, .A}
+    colorBlendAttachment.blendEnable = false
+    colorBlendAttachment.srcColorBlendFactor = .ONE // Optional
+    colorBlendAttachment.dstColorBlendFactor = .ZERO // Optional
+    colorBlendAttachment.colorBlendOp = .ADD // Optional
+    colorBlendAttachment.srcAlphaBlendFactor = .ONE // Optional
+    colorBlendAttachment.dstAlphaBlendFactor = .ZERO // Optional
+    colorBlendAttachment.alphaBlendOp = .ADD // Optional
+
+    colorBlending := vk.PipelineColorBlendStateCreateInfo{}
+    colorBlending.sType = .PIPELINE_COLOR_BLEND_STATE_CREATE_INFO
+    colorBlending.logicOpEnable = false
+    colorBlending.logicOp = .COPY // Optional
+    colorBlending.attachmentCount = 1
+    colorBlending.pAttachments = &colorBlendAttachment
+    colorBlending.blendConstants[0] = 0 // Optional
+    colorBlending.blendConstants[1] = 0 // Optional
+    colorBlending.blendConstants[2] = 0 // Optional
+    colorBlending.blendConstants[3] = 0 // Optional
+
+    pipelineLayoutInfo := vk.PipelineLayoutCreateInfo{}
+    pipelineLayoutInfo.sType = .PIPELINE_LAYOUT_CREATE_INFO
+    pipelineLayoutInfo.setLayoutCount = 0 // Optional
+    pipelineLayoutInfo.pSetLayouts = nil // Optional
+    pipelineLayoutInfo.pushConstantRangeCount = 0 // Optional
+    pipelineLayoutInfo.pPushConstantRanges = nil // Optional
+
+    if (vk.CreatePipelineLayout(device, &pipelineLayoutInfo, nil, &pipelineLayout) != .SUCCESS) {
+        log.error("Failed to create pipeline layout")
+        return
+    }
+
+    return pipelineLayout, true
 }
 
 init_vulkan :: proc(window: ^sdl2.Window) -> (handles: VulkanHandles, ok: bool) {
@@ -687,7 +786,10 @@ init_vulkan :: proc(window: ^sdl2.Window) -> (handles: VulkanHandles, ok: bool) 
         handles.surface,
     ) or_return
     create_image_views(handles.device, &handles.swapChainHandles) or_return
-    create_graphics_pipeline(handles.device)
+    handles.pipelineLayout = create_graphics_pipeline(
+        handles.device,
+        handles.swapChainExtent,
+    ) or_return
 
     return handles, true
 }
@@ -703,6 +805,7 @@ destroy_vulkan :: proc(handles: VulkanHandles) {
 
     delete(handles.swapChainImages)
     delete(handles.swapChainImageViews)
+    vk.DestroyPipelineLayout(handles.device, handles.pipelineLayout, nil)
     vk.DestroySwapchainKHR(handles.device, handles.swapChain, nil)
     vk.DestroyDevice(handles.device, nil)
     vk.DestroySurfaceKHR(handles.instance, handles.surface, nil)
