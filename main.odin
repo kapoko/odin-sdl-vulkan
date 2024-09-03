@@ -30,16 +30,25 @@ SwapChainSupportDetails :: struct {
     presentModes: [dynamic]vk.PresentModeKHR,
 }
 
-VulkanHandles :: struct {
-    instance:                    vk.Instance,
-    debugMessenger:              vk.DebugUtilsMessengerEXT,
+SwapChainHandles :: struct {
+    swapChain:            vk.SwapchainKHR,
+    swapChainImages:      [dynamic]vk.Image,
+    swapChainImageViews:  [dynamic]vk.ImageView,
+    swapChainImageFormat: vk.Format,
+    swapChainExtent:      vk.Extent2D,
+}
+
+LogicalDeviceHandles :: struct {
     device:                      vk.Device,
     graphicsQueue, presentQueue: vk.Queue,
-    surface:                     vk.SurfaceKHR,
-    swapChain:                   vk.SwapchainKHR,
-    swapChainImages:             [dynamic]vk.Image,
-    swapChainImageFormat:        vk.Format,
-    swapChainExtent:             vk.Extent2D,
+}
+
+VulkanHandles :: struct {
+    instance:                   vk.Instance,
+    debugMessenger:             vk.DebugUtilsMessengerEXT,
+    surface:                    vk.SurfaceKHR,
+    using logicalDeviceHandles: LogicalDeviceHandles,
+    using swapChainHandles:     SwapChainHandles,
 }
 
 CTX :: struct {
@@ -461,9 +470,7 @@ create_logical_device :: proc(
     physicalDevice: vk.PhysicalDevice,
     surface: vk.SurfaceKHR,
 ) -> (
-    device: vk.Device,
-    graphicsQueue: vk.Queue,
-    presentQueue: vk.Queue,
+    result: LogicalDeviceHandles,
     ok: bool,
 ) {
     indices: QueueFamilyIndices = find_queue_families(physicalDevice, surface)
@@ -502,12 +509,12 @@ create_logical_device :: proc(
         createInfo.ppEnabledLayerNames = &validationLayers[0]
     }
 
-    if (vk.CreateDevice(physicalDevice, &createInfo, nil, &device) != .SUCCESS) {
+    if (vk.CreateDevice(physicalDevice, &createInfo, nil, &result.device) != .SUCCESS) {
         log.error("Failed to create logical device")
     }
 
-    vk.GetDeviceQueue(device, indices.graphicsFamily.(u32), 0, &graphicsQueue)
-    vk.GetDeviceQueue(device, indices.presentFamily.(u32), 0, &presentQueue)
+    vk.GetDeviceQueue(result.device, indices.graphicsFamily.(u32), 0, &result.graphicsQueue)
+    vk.GetDeviceQueue(result.device, indices.presentFamily.(u32), 0, &result.presentQueue)
 
     ok = true
     return
@@ -519,10 +526,7 @@ create_swap_chain :: proc(
     device: vk.Device,
     surface: vk.SurfaceKHR,
 ) -> (
-    swapChain: vk.SwapchainKHR,
-    swapChainImages: [dynamic]vk.Image,
-    swapChainImageFormat: vk.Format,
-    swapChainExtent: vk.Extent2D,
+    result: SwapChainHandles,
     ok: bool,
 ) {
     support := query_swap_chain_support(physicalDevice, surface)
@@ -566,15 +570,47 @@ create_swap_chain :: proc(
     createInfo.presentMode = presentMode
     createInfo.clipped = true
 
-    if (vk.CreateSwapchainKHR(device, &createInfo, nil, &swapChain) != .SUCCESS) {
+    if (vk.CreateSwapchainKHR(device, &createInfo, nil, &result.swapChain) != .SUCCESS) {
         log.error("Failed to create swap chain")
     }
 
-    vk.GetSwapchainImagesKHR(device, swapChain, &imageCount, nil)
-    swapChainImages = make([dynamic]vk.Image, imageCount)
-    vk.GetSwapchainImagesKHR(device, swapChain, &imageCount, &swapChainImages[0])
+    vk.GetSwapchainImagesKHR(device, result.swapChain, &imageCount, nil)
+    result.swapChainImages = make([dynamic]vk.Image, imageCount)
+    vk.GetSwapchainImagesKHR(device, result.swapChain, &imageCount, &result.swapChainImages[0])
 
-    return swapChain, swapChainImages, surfaceFormat.format, extent, true
+    result.swapChainImageFormat = surfaceFormat.format
+    result.swapChainExtent = extent
+
+    return result, true
+}
+
+create_image_views :: proc(device: vk.Device, handles: ^SwapChainHandles) -> bool {
+    handles.swapChainImageViews = make([dynamic]vk.ImageView, len(handles.swapChainImages))
+
+    for image, i in handles.swapChainImages {
+        createInfo := vk.ImageViewCreateInfo{}
+        createInfo.sType = vk.StructureType.IMAGE_VIEW_CREATE_INFO
+        createInfo.image = image
+        createInfo.viewType = vk.ImageViewType.D2
+        createInfo.format = handles.swapChainImageFormat
+        createInfo.components.r = vk.ComponentSwizzle.IDENTITY
+        createInfo.components.g = vk.ComponentSwizzle.IDENTITY
+        createInfo.components.b = vk.ComponentSwizzle.IDENTITY
+        createInfo.components.a = vk.ComponentSwizzle.IDENTITY
+        createInfo.subresourceRange.aspectMask = {.COLOR}
+        createInfo.subresourceRange.baseMipLevel = 0
+        createInfo.subresourceRange.levelCount = 1
+        createInfo.subresourceRange.baseArrayLayer = 0
+        createInfo.subresourceRange.layerCount = 1
+
+        if (vk.CreateImageView(device, &createInfo, nil, &handles.swapChainImageViews[i]) !=
+               .SUCCESS) {
+            log.errorf("Failed to create image view %v/%v!", i, len(handles.swapChainImageViews))
+            return false
+        }
+    }
+
+    return true
 }
 
 init_vulkan :: proc(window: ^sdl2.Window) -> (handles: VulkanHandles, ok: bool) {
@@ -589,14 +625,33 @@ init_vulkan :: proc(window: ^sdl2.Window) -> (handles: VulkanHandles, ok: bool) 
     setup_debug_messenger(&handles.instance, &handles.debugMessenger) or_return
     handles.surface = create_surface(window, handles.instance) or_return
     physicalDevice := pick_physical_device(handles.instance, handles.surface) or_return
-    handles.device, handles.graphicsQueue, handles.presentQueue = create_logical_device(
+    handles.logicalDeviceHandles = create_logical_device(physicalDevice, handles.surface) or_return
+    handles.swapChainHandles = create_swap_chain(
+        window,
         physicalDevice,
+        handles.device,
         handles.surface,
     ) or_return
-    handles.swapChain, handles.swapChainImages, handles.swapChainImageFormat, handles.swapChainExtent =
-        create_swap_chain(window, physicalDevice, handles.device, handles.surface) or_return
+    create_image_views(handles.device, &handles.swapChainHandles) or_return
 
     return handles, true
+}
+
+destroy_vulkan :: proc(handles: VulkanHandles) {
+    if ENABLE_VALIDATION_LAYERS {
+        vk.DestroyDebugUtilsMessengerEXT(ctx.instance, ctx.debugMessenger, nil)
+    }
+
+    for imageView in handles.swapChainImageViews {
+        vk.DestroyImageView(handles.device, imageView, nil)
+    }
+
+    delete(handles.swapChainImages)
+    delete(handles.swapChainImageViews)
+    vk.DestroySwapchainKHR(handles.device, handles.swapChain, nil)
+    vk.DestroyDevice(handles.device, nil)
+    vk.DestroySurfaceKHR(handles.instance, handles.surface, nil)
+    vk.DestroyInstance(handles.instance, nil)
 }
 
 main :: proc() {
@@ -643,15 +698,7 @@ main :: proc() {
         }
     }
 
-    if ENABLE_VALIDATION_LAYERS {
-        vk.DestroyDebugUtilsMessengerEXT(ctx.instance, ctx.debugMessenger, nil)
-    }
-
-    delete(ctx.swapChainImages)
-    vk.DestroySwapchainKHR(ctx.device, ctx.swapChain, nil)
-    vk.DestroyDevice(ctx.device, nil)
-    vk.DestroySurfaceKHR(ctx.instance, ctx.surface, nil)
-    vk.DestroyInstance(ctx.instance, nil)
+    destroy_vulkan(ctx.vulkanHandles)
     sdl2.DestroyWindow(ctx.window)
     sdl2.Quit()
 }
