@@ -13,8 +13,9 @@ import vk "vendor:vulkan"
 WINDOW_TITLE :: "Vulkan SDL"
 VIEW_WIDTH :: 640
 VIEW_HEIGHT :: 480
-WINDOW_FLAGS :: sdl2.WindowFlags{.SHOWN, .ALLOW_HIGHDPI, .VULKAN}
+WINDOW_FLAGS :: sdl2.WindowFlags{.SHOWN, .ALLOW_HIGHDPI, .VULKAN, .RESIZABLE}
 ENABLE_VALIDATION_LAYERS :: ODIN_DEBUG
+MAX_FRAMES_IN_FLIGHT :: 2
 
 validationLayers := [?]cstring{"VK_LAYER_KHRONOS_validation"}
 deviceExtensions := [?]cstring{vk.KHR_SWAPCHAIN_EXTENSION_NAME, "VK_KHR_portability_subset"}
@@ -59,17 +60,20 @@ VulkanHandles :: struct {
     debugMessenger:                vk.DebugUtilsMessengerEXT,
     surface:                       vk.SurfaceKHR,
     renderPass:                    vk.RenderPass,
-    frameBuffers:                  [dynamic]vk.Framebuffer,
+    framebuffers:                  [dynamic]vk.Framebuffer,
     commandPool:                   vk.CommandPool,
-    commandBuffer:                 vk.CommandBuffer,
+    commandBuffers:                [MAX_FRAMES_IN_FLIGHT]vk.CommandBuffer,
+    syncObjects:                   [MAX_FRAMES_IN_FLIGHT]SyncObjects,
+    physicalDevice:                vk.PhysicalDevice,
     using logicalDeviceHandles:    LogicalDeviceHandles,
     using swapChainHandles:        SwapChainHandles,
     using graphicsPipelineHandles: GraphicsPipelineHandles,
-    using syncObjects:             SyncObjects,
 }
 
 CTX :: struct {
     window:              ^sdl2.Window,
+    currentFrame:        u32,
+    framebufferResized:  bool,
     using vulkanHandles: VulkanHandles,
 }
 
@@ -77,7 +81,7 @@ is_queue_family_complete :: proc(q: QueueFamilyIndices) -> bool {
     return q.graphicsFamily != nil && q.presentFamily != nil
 }
 
-init_window :: proc() -> (window: ^sdl2.Window, ok: bool) {
+init_window :: proc(framebufferResized: ^bool) -> (window: ^sdl2.Window, ok: bool) {
     if sdl_res := sdl2.Init(sdl2.INIT_VIDEO); sdl_res < 0 {
         log.errorf("sdl2.init returned %v.", sdl_res)
         return
@@ -92,6 +96,7 @@ init_window :: proc() -> (window: ^sdl2.Window, ok: bool) {
     windowX: i32 = ((bounds.w - bounds.x) / 2) - i32(VIEW_WIDTH / 2) + bounds.x
     windowY: i32 = ((bounds.h - bounds.y) / 2) - i32(VIEW_HEIGHT / 2) + bounds.y
 
+    sdl2.SetEventFilter(window_event_handler, framebufferResized)
     window = sdl2.CreateWindow(
         WINDOW_TITLE,
         windowX,
@@ -107,6 +112,23 @@ init_window :: proc() -> (window: ^sdl2.Window, ok: bool) {
     }
 
     return window, true
+}
+
+window_event_handler :: proc "c" (userdata: rawptr, event: ^sdl2.Event) -> i32 {
+    context = runtime.default_context()
+
+    if (event.type == sdl2.EventType.WINDOWEVENT) {
+        windowEvent: ^sdl2.WindowEvent = &event.window
+        #partial switch (windowEvent.event) {
+        case sdl2.WindowEventID.RESIZED:
+            framebufferResized := cast(^bool)userdata
+            framebufferResized^ = true
+
+            return 0
+        }
+    }
+
+    return 1
 }
 
 check_validation_layer_support :: proc() -> bool {
@@ -574,6 +596,7 @@ create_swap_chain :: proc(
     createInfo.imageExtent = extent
     createInfo.imageArrayLayers = 1
     createInfo.imageUsage = {.COLOR_ATTACHMENT}
+    createInfo.oldSwapchain = 0
 
     indices := find_queue_families(physicalDevice, surface)
     queueFamilyIndices := [?]u32{indices.graphicsFamily.(u32), indices.presentFamily.(u32)}
@@ -605,6 +628,27 @@ create_swap_chain :: proc(
     result.swapChainExtent = extent
 
     return result, true
+}
+
+recreate_swapchain :: proc(window: ^sdl2.Window, v: ^VulkanHandles) -> (ok: bool) {
+    // In case window is minimized, wait
+    width, height: i32
+    sdl2.Vulkan_GetDrawableSize(window, &width, &height)
+    for (width == 0 || height == 0) {
+        sdl2.Vulkan_GetDrawableSize(window, &width, &height)
+        sdl2.WaitEvent(nil)
+    }
+
+    vk.DeviceWaitIdle(v.device)
+
+    v.swapChainHandles = create_swap_chain(window, v.physicalDevice, v.device, v.surface) or_return
+    v.swapChainHandles.swapChainImageViews = create_image_views(
+        v.device,
+        v.swapChainHandles,
+    ) or_return
+    v.framebuffers = create_framebuffers(v.swapChainHandles, v.renderPass, v.device) or_return
+
+    return true
 }
 
 create_image_views :: proc(
@@ -873,12 +917,12 @@ create_framebuffers :: proc(
     renderPass: vk.RenderPass,
     device: vk.Device,
 ) -> (
-    frameBuffers: [dynamic]vk.Framebuffer,
+    framebuffers: [dynamic]vk.Framebuffer,
     ok: bool,
 ) {
-    frameBuffers = make([dynamic]vk.Framebuffer, len(swapChainHandles.swapChainImageViews))
+    framebuffers = make([dynamic]vk.Framebuffer, len(swapChainHandles.swapChainImageViews))
 
-    for &buffer, i in frameBuffers {
+    for &buffer, i in framebuffers {
         attachments := [?]vk.ImageView{swapChainHandles.swapChainImageViews[i]}
 
         framebufferInfo := vk.FramebufferCreateInfo{}
@@ -896,7 +940,7 @@ create_framebuffers :: proc(
         }
     }
 
-    return frameBuffers, true
+    return framebuffers, true
 }
 
 create_command_pool :: proc(
@@ -921,31 +965,31 @@ create_command_pool :: proc(
     return commandPool, true
 }
 
-create_command_buffer :: proc(
+create_command_buffers :: proc(
     device: vk.Device,
     commandPool: vk.CommandPool,
 ) -> (
-    commandBuffer: vk.CommandBuffer,
+    commandBuffers: [MAX_FRAMES_IN_FLIGHT]vk.CommandBuffer,
     ok: bool,
 ) {
     allocInfo := vk.CommandBufferAllocateInfo{}
     allocInfo.sType = .COMMAND_BUFFER_ALLOCATE_INFO
     allocInfo.commandPool = commandPool
     allocInfo.level = .PRIMARY
-    allocInfo.commandBufferCount = 1
+    allocInfo.commandBufferCount = len(commandBuffers)
 
-    if (vk.AllocateCommandBuffers(device, &allocInfo, &commandBuffer) != .SUCCESS) {
+    if (vk.AllocateCommandBuffers(device, &allocInfo, &commandBuffers[0]) != .SUCCESS) {
         log.error("Failed to allocate command buffers")
         return
     }
 
-    return commandBuffer, true
+    return commandBuffers, true
 }
 
 record_command_buffer :: proc(
     commandBuffer: vk.CommandBuffer,
     renderPass: vk.RenderPass,
-    frameBuffers: [dynamic]vk.Framebuffer,
+    framebuffers: [dynamic]vk.Framebuffer,
     swapChainHandles: SwapChainHandles,
     graphicsPipeline: vk.Pipeline,
     imageIndex: u32,
@@ -965,7 +1009,7 @@ record_command_buffer :: proc(
     renderPassInfo := vk.RenderPassBeginInfo{}
     renderPassInfo.sType = .RENDER_PASS_BEGIN_INFO
     renderPassInfo.renderPass = renderPass
-    renderPassInfo.framebuffer = frameBuffers[imageIndex]
+    renderPassInfo.framebuffer = framebuffers[imageIndex]
     renderPassInfo.renderArea.offset = {0, 0}
     renderPassInfo.renderArea.extent = swapChainHandles.swapChainExtent
 
@@ -1003,20 +1047,39 @@ record_command_buffer :: proc(
     return true
 }
 
-create_sync_objects :: proc(device: vk.Device) -> (syncObjects: SyncObjects, ok: bool) {
+create_sync_objects :: proc(
+    device: vk.Device,
+) -> (
+    syncObjects: [MAX_FRAMES_IN_FLIGHT]SyncObjects,
+    ok: bool,
+) {
     semaphoreInfo := vk.SemaphoreCreateInfo{}
     semaphoreInfo.sType = .SEMAPHORE_CREATE_INFO
     fenceInfo := vk.FenceCreateInfo{}
     fenceInfo.sType = .FENCE_CREATE_INFO
     fenceInfo.flags = {.SIGNALED}
 
-    if (vk.CreateSemaphore(device, &semaphoreInfo, nil, &syncObjects.imageAvailableSemaphore) !=
-               .SUCCESS ||
-           vk.CreateSemaphore(device, &semaphoreInfo, nil, &syncObjects.renderFinishedSemaphore) !=
-               .SUCCESS ||
-           vk.CreateFence(device, &fenceInfo, nil, &syncObjects.inFlightFence) != .SUCCESS) {
-        log.error("Failed to create semaphores")
-        return
+    for i in 0 ..< MAX_FRAMES_IN_FLIGHT {
+        if (vk.CreateSemaphore(
+                   device,
+                   &semaphoreInfo,
+                   nil,
+                   &syncObjects[i].imageAvailableSemaphore,
+               ) !=
+                   .SUCCESS ||
+               vk.CreateSemaphore(
+                   device,
+                   &semaphoreInfo,
+                   nil,
+                   &syncObjects[i].renderFinishedSemaphore,
+               ) !=
+                   .SUCCESS ||
+               vk.CreateFence(device, &fenceInfo, nil, &syncObjects[i].inFlightFence) !=
+                   .SUCCESS) {
+
+            log.error("Failed to create semaphores")
+            return
+        }
     }
 
     return syncObjects, true
@@ -1026,9 +1089,9 @@ init_vulkan :: proc(window: ^sdl2.Window) -> (v: VulkanHandles, ok: bool) {
     v.instance = create_vulkan_instance(window) or_return
     v.debugMessenger = setup_debug_messenger(v.instance) or_return
     v.surface = create_surface(window, v.instance) or_return
-    physicalDevice := pick_physical_device(v.instance, v.surface) or_return
-    v.logicalDeviceHandles = create_logical_device(physicalDevice, v.surface) or_return
-    v.swapChainHandles = create_swap_chain(window, physicalDevice, v.device, v.surface) or_return
+    v.physicalDevice = pick_physical_device(v.instance, v.surface) or_return
+    v.logicalDeviceHandles = create_logical_device(v.physicalDevice, v.surface) or_return
+    v.swapChainHandles = create_swap_chain(window, v.physicalDevice, v.device, v.surface) or_return
     v.swapChainImageViews = create_image_views(v.device, v.swapChainHandles) or_return
     v.renderPass = create_render_pass(v.device, v.swapChainImageFormat) or_return
     v.graphicsPipelineHandles = create_graphics_pipeline(
@@ -1036,62 +1099,94 @@ init_vulkan :: proc(window: ^sdl2.Window) -> (v: VulkanHandles, ok: bool) {
         v.renderPass,
         v.swapChainExtent,
     ) or_return
-    v.frameBuffers = create_framebuffers(v.swapChainHandles, v.renderPass, v.device) or_return
-    v.commandPool = create_command_pool(physicalDevice, v.surface, v.device) or_return
-    v.commandBuffer = create_command_buffer(v.device, v.commandPool) or_return
+    v.framebuffers = create_framebuffers(v.swapChainHandles, v.renderPass, v.device) or_return
+    v.commandPool = create_command_pool(v.physicalDevice, v.surface, v.device) or_return
+    v.commandBuffers = create_command_buffers(v.device, v.commandPool) or_return
     v.syncObjects = create_sync_objects(v.device) or_return
 
     return v, true
 }
 
+cleanup_swapchain :: proc(
+    device: vk.Device,
+    s: SwapChainHandles,
+    framebuffers: [dynamic]vk.Framebuffer,
+) {
+
+    for buffer in framebuffers {
+        vk.DestroyFramebuffer(device, buffer, nil)
+    }
+
+    for imageView in s.swapChainImageViews {
+        vk.DestroyImageView(device, imageView, nil)
+    }
+
+    delete(s.swapChainImages)
+    delete(s.swapChainImageViews)
+    delete(framebuffers)
+    vk.DestroySwapchainKHR(device, s.swapChain, nil)
+}
+
 destroy_vulkan :: proc(v: VulkanHandles) {
+    cleanup_swapchain(v.device, v.swapChainHandles, v.framebuffers)
+    vk.DestroyPipeline(v.device, v.graphicsPipeline, nil)
+    vk.DestroyPipelineLayout(v.device, v.pipelineLayout, nil)
+    vk.DestroyRenderPass(v.device, v.renderPass, nil)
+
+    for s in v.syncObjects {
+        vk.DestroySemaphore(v.device, s.imageAvailableSemaphore, nil)
+        vk.DestroySemaphore(v.device, s.renderFinishedSemaphore, nil)
+        vk.DestroyFence(v.device, s.inFlightFence, nil)
+    }
+
+    vk.DestroyCommandPool(v.device, v.commandPool, nil)
+    vk.DestroyDevice(v.device, nil)
+
     if ENABLE_VALIDATION_LAYERS {
         vk.DestroyDebugUtilsMessengerEXT(v.instance, v.debugMessenger, nil)
     }
 
-    for imageView in v.swapChainImageViews {
-        vk.DestroyImageView(v.device, imageView, nil)
-    }
-
-    for buffer in v.frameBuffers {
-        vk.DestroyFramebuffer(v.device, buffer, nil)
-    }
-
-    delete(v.swapChainImages)
-    delete(v.swapChainImageViews)
-    delete(v.frameBuffers)
-    vk.DestroySemaphore(v.device, v.imageAvailableSemaphore, nil)
-    vk.DestroySemaphore(v.device, v.renderFinishedSemaphore, nil)
-    vk.DestroyFence(v.device, v.inFlightFence, nil)
-    vk.DestroyCommandPool(v.device, v.commandPool, nil)
-    vk.DestroyPipeline(v.device, v.graphicsPipeline, nil)
-    vk.DestroyPipelineLayout(v.device, v.pipelineLayout, nil)
-    vk.DestroyRenderPass(v.device, v.renderPass, nil)
-    vk.DestroySwapchainKHR(v.device, v.swapChain, nil)
-    vk.DestroyDevice(v.device, nil)
     vk.DestroySurfaceKHR(v.instance, v.surface, nil)
     vk.DestroyInstance(v.instance, nil)
 }
 
-draw :: proc(v: ^VulkanHandles) {
-    vk.WaitForFences(v.device, 1, &v.inFlightFence, true, max(u64))
-    vk.ResetFences(v.device, 1, &v.inFlightFence)
+draw :: proc(
+    v: ^VulkanHandles,
+    window: ^sdl2.Window,
+    framebufferResized: ^bool,
+    currentFrame: ^u32,
+) -> (
+    ok: bool,
+) {
+    sync := v.syncObjects[currentFrame^]
+    commandBuffer := v.commandBuffers[currentFrame^]
+
+    vk.WaitForFences(v.device, 1, &sync.inFlightFence, true, max(u64))
 
     imageIndex: u32
-    vk.AcquireNextImageKHR(
+    res := vk.AcquireNextImageKHR(
         v.device,
         v.swapChain,
         max(u64),
-        v.imageAvailableSemaphore,
+        sync.imageAvailableSemaphore,
         0,
         &imageIndex,
     )
 
-    vk.ResetCommandBuffer(v.commandBuffer, {})
+    if res == .ERROR_OUT_OF_DATE_KHR {
+        recreate_swapchain(window, v) or_return
+    } else if (res != .SUCCESS && res != .SUBOPTIMAL_KHR) {
+        log.error("Failed to acquire swap chain image")
+        return
+    }
+
+    vk.ResetFences(v.device, 1, &sync.inFlightFence)
+
+    vk.ResetCommandBuffer(v.commandBuffers[currentFrame^], {})
     record_command_buffer(
-        v.commandBuffer,
+        v.commandBuffers[currentFrame^],
         v.renderPass,
-        v.frameBuffers,
+        v.framebuffers,
         v.swapChainHandles,
         v.graphicsPipeline,
         imageIndex,
@@ -1100,19 +1195,19 @@ draw :: proc(v: ^VulkanHandles) {
     submitInfo := vk.SubmitInfo{}
     submitInfo.sType = .SUBMIT_INFO
 
-    waitSemaphores := [?]vk.Semaphore{v.imageAvailableSemaphore}
+    waitSemaphores := [?]vk.Semaphore{sync.imageAvailableSemaphore}
     waitStages: vk.PipelineStageFlags = {.COLOR_ATTACHMENT_OUTPUT}
     submitInfo.waitSemaphoreCount = 1
     submitInfo.pWaitSemaphores = &waitSemaphores[0]
     submitInfo.pWaitDstStageMask = &waitStages
     submitInfo.commandBufferCount = 1
-    submitInfo.pCommandBuffers = &v.commandBuffer
+    submitInfo.pCommandBuffers = &commandBuffer
 
-    signalSemaphores := [?]vk.Semaphore{v.renderFinishedSemaphore}
+    signalSemaphores := [?]vk.Semaphore{sync.renderFinishedSemaphore}
     submitInfo.signalSemaphoreCount = 1
     submitInfo.pSignalSemaphores = &signalSemaphores[0]
 
-    if (vk.QueueSubmit(v.graphicsQueue, 1, &submitInfo, v.inFlightFence) != .SUCCESS) {
+    if (vk.QueueSubmit(v.graphicsQueue, 1, &submitInfo, sync.inFlightFence) != .SUCCESS) {
         log.error("Failed to submit draw command buffer")
     }
 
@@ -1127,7 +1222,18 @@ draw :: proc(v: ^VulkanHandles) {
     presentInfo.pImageIndices = &imageIndex
     presentInfo.pResults = nil
 
-    vk.QueuePresentKHR(v.presentQueue, &presentInfo)
+    res = vk.QueuePresentKHR(v.presentQueue, &presentInfo)
+
+    if res == .ERROR_OUT_OF_DATE_KHR || res == .SUBOPTIMAL_KHR || framebufferResized^ {
+        framebufferResized^ = false
+        recreate_swapchain(window, v) or_return
+    } else if res != .SUCCESS {
+        log.error("Failed to present swap chain image")
+        return
+    }
+
+    currentFrame^ = (currentFrame^ + 1) % MAX_FRAMES_IN_FLIGHT
+    return true
 }
 
 main :: proc() {
@@ -1153,7 +1259,7 @@ main :: proc() {
     defer reset_tracking_allocator(&trackingAllocator)
 
     ok: bool
-    if ctx.window, ok = init_window(); !ok {
+    if ctx.window, ok = init_window(&ctx.framebufferResized); !ok {
         os.exit(1)
     }
 
@@ -1175,7 +1281,8 @@ main :: proc() {
             }
         }
 
-        draw(&ctx.vulkanHandles)
+        draw(&ctx.vulkanHandles, ctx.window, &ctx.framebufferResized, &ctx.currentFrame)
+        vk.DeviceWaitIdle(ctx.device)
     }
 
     destroy_vulkan(ctx.vulkanHandles)
