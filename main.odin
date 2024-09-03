@@ -925,6 +925,67 @@ create_command_buffer :: proc(
     return commandBuffer, true
 }
 
+record_command_buffer :: proc(
+    commandBuffer: vk.CommandBuffer,
+    renderPass: vk.RenderPass,
+    frameBuffers: [dynamic]vk.Framebuffer,
+    swapChainHandles: SwapChainHandles,
+    graphicsPipeline: vk.Pipeline,
+    imageIndex: u32,
+) -> (
+    ok: bool,
+) {
+    beginInfo := vk.CommandBufferBeginInfo{}
+    beginInfo.sType = .COMMAND_BUFFER_BEGIN_INFO
+    beginInfo.flags = nil // Optional
+    beginInfo.pInheritanceInfo = nil // Optional
+
+    if (vk.BeginCommandBuffer(commandBuffer, &beginInfo) != .SUCCESS) {
+        log.error("Failed to begin recording command buffer!")
+        return
+    }
+
+    renderPassInfo := vk.RenderPassBeginInfo{}
+    renderPassInfo.sType = .RENDER_PASS_BEGIN_INFO
+    renderPassInfo.renderPass = renderPass
+    renderPassInfo.framebuffer = frameBuffers[imageIndex]
+    renderPassInfo.renderArea.offset = {0, 0}
+    renderPassInfo.renderArea.extent = swapChainHandles.swapChainExtent
+
+    clearColor := vk.ClearValue {
+        color = {float32 = {0, 0.5, 0, 1}},
+    }
+    renderPassInfo.clearValueCount = 1
+    renderPassInfo.pClearValues = &clearColor
+
+
+    vk.CmdBeginRenderPass(commandBuffer, &renderPassInfo, .INLINE)
+    vk.CmdBindPipeline(commandBuffer, .GRAPHICS, graphicsPipeline)
+
+    viewport := vk.Viewport{}
+    viewport.x = 0
+    viewport.y = 0
+    viewport.width = f32(swapChainHandles.swapChainExtent.width)
+    viewport.height = f32(swapChainHandles.swapChainExtent.height)
+    viewport.minDepth = 0
+    viewport.maxDepth = 1
+    vk.CmdSetViewport(commandBuffer, 0, 1, &viewport)
+
+    scissor := vk.Rect2D{}
+    scissor.offset = {0, 0}
+    scissor.extent = swapChainHandles.swapChainExtent
+    vk.CmdSetScissor(commandBuffer, 0, 1, &scissor)
+
+    vk.CmdDraw(commandBuffer, 3, 1, 0, 0)
+
+    vk.CmdEndRenderPass(commandBuffer)
+    if vk.EndCommandBuffer(commandBuffer) != .SUCCESS {
+        log.error("Failed to record command buffer")
+    }
+
+    return true
+}
+
 init_vulkan :: proc(window: ^sdl2.Window) -> (v: VulkanHandles, ok: bool) {
     v.instance = create_vulkan_instance(window) or_return
     v.debugMessenger = setup_debug_messenger(v.instance) or_return
