@@ -57,8 +57,6 @@ CTX :: struct {
     using vulkanHandles: VulkanHandles,
 }
 
-ctx := CTX{}
-
 is_queue_family_complete :: proc(q: QueueFamilyIndices) -> bool {
     return q.graphicsFamily != nil && q.presentFamily != nil
 }
@@ -163,7 +161,7 @@ populate_debug_create_info :: proc(
     return createInfo
 }
 
-create_vulkan_instance :: proc(instance: ^vk.Instance) -> bool {
+create_vulkan_instance :: proc(window: ^sdl2.Window) -> (instance: vk.Instance, ok: bool) {
     if (ENABLE_VALIDATION_LAYERS && !check_validation_layer_support()) {
         log.error("Validation layers requested, but not available")
     }
@@ -177,10 +175,10 @@ create_vulkan_instance :: proc(instance: ^vk.Instance) -> bool {
     appInfo.apiVersion = vk.API_VERSION_1_3
 
     extensionCount: u32
-    sdl2.Vulkan_GetInstanceExtensions(ctx.window, &extensionCount, nil)
+    sdl2.Vulkan_GetInstanceExtensions(window, &extensionCount, nil)
     extensionNames := make([dynamic]cstring, extensionCount)
     defer delete(extensionNames)
-    sdl2.Vulkan_GetInstanceExtensions(ctx.window, &extensionCount, &extensionNames[0])
+    sdl2.Vulkan_GetInstanceExtensions(window, &extensionCount, &extensionNames[0])
 
     if (ENABLE_VALIDATION_LAYERS) {
         append(&extensionNames, vk.EXT_DEBUG_UTILS_EXTENSION_NAME)
@@ -217,38 +215,40 @@ create_vulkan_instance :: proc(instance: ^vk.Instance) -> bool {
         createInfo.pNext = populate_debug_create_info(&debugCreateInfo)
     }
 
-    res := vk.CreateInstance(&createInfo, nil, instance)
+    res := vk.CreateInstance(&createInfo, nil, &instance)
     if res != vk.Result.SUCCESS {
         log.error("Failed to create Vulkan instance:", res)
-        return false
+        return
     }
 
     // Load the rest of the vulkan functions
-    vk.load_proc_addresses_instance(instance^)
+    vk.load_proc_addresses_instance(instance)
 
-    return true
+    return instance, true
 }
 
 setup_debug_messenger :: proc(
-    instance: ^vk.Instance,
-    debugMessenger: ^vk.DebugUtilsMessengerEXT,
-) -> bool {
+    instance: vk.Instance,
+) -> (
+    debugMessenger: vk.DebugUtilsMessengerEXT,
+    ok: bool,
+) {
     // Setup debug messenger
     if ENABLE_VALIDATION_LAYERS {
         debugCreateInfo := vk.DebugUtilsMessengerCreateInfoEXT{}
         if vk.CreateDebugUtilsMessengerEXT(
-               instance^,
+               instance,
                populate_debug_create_info(&debugCreateInfo),
                nil,
-               debugMessenger,
+               &debugMessenger,
            ) !=
            .SUCCESS {
             log.error("Failed to setup debug messenger.")
-            return false
+            return
         }
     }
 
-    return true
+    return debugMessenger, true
 }
 
 find_queue_families :: proc(
@@ -774,8 +774,10 @@ init_vulkan :: proc(window: ^sdl2.Window) -> (handles: VulkanHandles, ok: bool) 
     assert(vk.CreateInstance != nil)
 
     // Here we go
-    create_vulkan_instance(&handles.instance) or_return
-    setup_debug_messenger(&handles.instance, &handles.debugMessenger) or_return
+    handles.instance = create_vulkan_instance(window) or_return
+    handles.debugMessenger = setup_debug_messenger(
+        handles.instance,
+    ) or_return
     handles.surface = create_surface(window, handles.instance) or_return
     physicalDevice := pick_physical_device(handles.instance, handles.surface) or_return
     handles.logicalDeviceHandles = create_logical_device(physicalDevice, handles.surface) or_return
@@ -796,7 +798,7 @@ init_vulkan :: proc(window: ^sdl2.Window) -> (handles: VulkanHandles, ok: bool) 
 
 destroy_vulkan :: proc(handles: VulkanHandles) {
     if ENABLE_VALIDATION_LAYERS {
-        vk.DestroyDebugUtilsMessengerEXT(ctx.instance, ctx.debugMessenger, nil)
+        vk.DestroyDebugUtilsMessengerEXT(handles.instance, handles.debugMessenger, nil)
     }
 
     for imageView in handles.swapChainImageViews {
@@ -814,6 +816,8 @@ destroy_vulkan :: proc(handles: VulkanHandles) {
 
 main :: proc() {
     context.logger = log.create_console_logger()
+
+    ctx := CTX{}
 
     trackingAllocator: mem.Tracking_Allocator
     when ODIN_DEBUG {
