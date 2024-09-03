@@ -3,6 +3,7 @@ package main
 import "base:runtime"
 import "core:fmt"
 import "core:log"
+import "core:math"
 import "core:mem"
 import "core:os"
 import "core:strings"
@@ -16,11 +17,17 @@ WINDOW_FLAGS :: sdl2.WindowFlags{.SHOWN, .ALLOW_HIGHDPI, .VULKAN}
 ENABLE_VALIDATION_LAYERS :: ODIN_DEBUG
 
 validationLayers := [?]cstring{"VK_LAYER_KHRONOS_validation"}
-deviceExtensions := [?]cstring{vk.KHR_SWAPCHAIN_EXTENSION_NAME}
+deviceExtensions := [?]cstring{vk.KHR_SWAPCHAIN_EXTENSION_NAME, "VK_KHR_portability_subset"}
 
 QueueFamilyIndices :: struct {
     graphicsFamily: Maybe(u32),
     presentFamily:  Maybe(u32),
+}
+
+SwapChainSupportDetails :: struct {
+    capabilities: vk.SurfaceCapabilitiesKHR,
+    formats:      [dynamic]vk.SurfaceFormatKHR,
+    presentModes: [dynamic]vk.PresentModeKHR,
 }
 
 VulkanHandles :: struct {
@@ -29,6 +36,10 @@ VulkanHandles :: struct {
     device:                      vk.Device,
     graphicsQueue, presentQueue: vk.Queue,
     surface:                     vk.SurfaceKHR,
+    swapChain:                   vk.SwapchainKHR,
+    swapChainImages:             [dynamic]vk.Image,
+    swapChainImageFormat:        vk.Format,
+    swapChainExtent:             vk.Extent2D,
 }
 
 CTX :: struct {
@@ -302,6 +313,87 @@ check_device_extension_support :: proc(device: vk.PhysicalDevice) -> bool {
     return len(deviceExtensions) == found
 }
 
+query_swap_chain_support :: proc(
+    device: vk.PhysicalDevice,
+    surface: vk.SurfaceKHR,
+) -> (
+    details: SwapChainSupportDetails,
+) {
+    vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(device, surface, &details.capabilities)
+
+    formatCount: u32
+    vk.GetPhysicalDeviceSurfaceFormatsKHR(device, surface, &formatCount, nil)
+    if (formatCount != 0) {
+        details.formats = make([dynamic]vk.SurfaceFormatKHR, formatCount)
+        vk.GetPhysicalDeviceSurfaceFormatsKHR(device, surface, &formatCount, &details.formats[0])
+    }
+
+    presentModeCount: u32
+    vk.GetPhysicalDeviceSurfacePresentModesKHR(device, surface, &presentModeCount, nil)
+    if (presentModeCount != 0) {
+        details.presentModes = make([dynamic]vk.PresentModeKHR, presentModeCount)
+        vk.GetPhysicalDeviceSurfacePresentModesKHR(
+            device,
+            surface,
+            &presentModeCount,
+            &details.presentModes[0],
+        )
+    }
+
+    return details
+}
+
+destroy_swap_chain_support :: proc(support: SwapChainSupportDetails) {
+    delete(support.presentModes)
+    delete(support.formats)
+}
+
+choose_swap_surface_format :: proc(
+    availableFormats: [dynamic]vk.SurfaceFormatKHR,
+) -> vk.SurfaceFormatKHR {
+    for availableFormat in availableFormats {
+        if (availableFormat.format == vk.Format.B8G8R8A8_SRGB &&
+               availableFormat.colorSpace == vk.ColorSpaceKHR.COLORSPACE_SRGB_NONLINEAR) {
+            return availableFormat
+        }
+    }
+
+    // Could rank the available formats based on how 'good' they are but most cases first one is ok
+    return availableFormats[0]
+}
+
+choose_swap_present_mode :: proc(
+    availablePresentModes: [dynamic]vk.PresentModeKHR,
+) -> vk.PresentModeKHR {
+
+    for availablePresentMode in availablePresentModes {
+        if (availablePresentMode == vk.PresentModeKHR.MAILBOX) {
+            return availablePresentMode
+        }
+    }
+
+    return vk.PresentModeKHR.FIFO
+}
+
+choose_swap_extent :: proc(
+    window: ^sdl2.Window,
+    capabilities: ^vk.SurfaceCapabilitiesKHR,
+) -> vk.Extent2D {
+    if capabilities.currentExtent.width != max(u32) {
+        return capabilities.currentExtent
+    }
+
+    width, height: i32
+    sdl2.Vulkan_GetDrawableSize(window, &width, &height)
+
+    actualExtent: vk.Extent2D = {u32(width), u32(height)}
+    min, max := capabilities.minImageExtent, capabilities.maxImageExtent
+    actualExtent.width = math.clamp(actualExtent.width, min.width, max.width)
+    actualExtent.height = math.clamp(actualExtent.height, min.height, max.height)
+
+    return actualExtent
+}
+
 is_device_suitable :: proc(
     device: vk.PhysicalDevice,
     surface: vk.SurfaceKHR,
@@ -315,7 +407,14 @@ is_device_suitable :: proc(
 
     indices: QueueFamilyIndices = find_queue_families(device, surface)
     extensionsSupported := check_device_extension_support(device)
-    isSuitable = is_queue_family_complete(indices) && extensionsSupported
+    swapChainAdequate: bool = false
+    if extensionsSupported {
+        support := query_swap_chain_support(device, surface)
+        defer destroy_swap_chain_support(support)
+        swapChainAdequate = len(support.formats) > 0 && len(support.presentModes) > 0
+    }
+
+    isSuitable = is_queue_family_complete(indices) && extensionsSupported && swapChainAdequate
 
     if isSuitable && ODIN_DEBUG {
         log.infof("Found suitable device: %s", deviceProperties.deviceName)
@@ -388,7 +487,6 @@ create_logical_device :: proc(
         append(&queueCreateInfos, queueCreateInfo)
     }
 
-
     deviceFeatures := vk.PhysicalDeviceFeatures{} // Empty for now
     createInfo := vk.DeviceCreateInfo{}
     createInfo.sType = vk.StructureType.DEVICE_CREATE_INFO
@@ -396,36 +494,8 @@ create_logical_device :: proc(
     createInfo.queueCreateInfoCount = cast(u32)len(queueCreateInfos)
     createInfo.pEnabledFeatures = &deviceFeatures
     createInfo.enabledLayerCount = 0
-
-    extensionCount: u32 = 0
-    vk.EnumerateDeviceExtensionProperties(physicalDevice, nil, &extensionCount, nil)
-    supportedExtensions := make([dynamic]vk.ExtensionProperties, extensionCount)
-    defer delete(supportedExtensions)
-    vk.EnumerateDeviceExtensionProperties(
-        physicalDevice,
-        nil,
-        &extensionCount,
-        &supportedExtensions[0],
-    )
-
-    extensions := [?]cstring{"VK_KHR_portability_subset"}
-
-    for extension in extensions {
-        extensionFound := false
-        for &supportedExtension in supportedExtensions {
-            if runtime.cstring_eq(extension, cast(cstring)&supportedExtension.extensionName[0]) {
-                extensionFound = true
-                break
-            }
-        }
-        if !extensionFound {
-            log.errorf("Device extension not found: %s", extension)
-            return
-        }
-    }
-
-    createInfo.enabledExtensionCount = len(extensions)
-    createInfo.ppEnabledExtensionNames = &extensions[0]
+    createInfo.enabledExtensionCount = len(deviceExtensions)
+    createInfo.ppEnabledExtensionNames = &deviceExtensions[0]
 
     if (ENABLE_VALIDATION_LAYERS) {
         createInfo.enabledLayerCount = len(validationLayers)
@@ -441,6 +511,70 @@ create_logical_device :: proc(
 
     ok = true
     return
+}
+
+create_swap_chain :: proc(
+    window: ^sdl2.Window,
+    physicalDevice: vk.PhysicalDevice,
+    device: vk.Device,
+    surface: vk.SurfaceKHR,
+) -> (
+    swapChain: vk.SwapchainKHR,
+    swapChainImages: [dynamic]vk.Image,
+    swapChainImageFormat: vk.Format,
+    swapChainExtent: vk.Extent2D,
+    ok: bool,
+) {
+    support := query_swap_chain_support(physicalDevice, surface)
+    defer destroy_swap_chain_support(support)
+
+    surfaceFormat := choose_swap_surface_format(support.formats)
+    presentMode := choose_swap_present_mode(support.presentModes)
+    extent := choose_swap_extent(window, &support.capabilities)
+
+    imageCount := support.capabilities.minImageCount + 1
+    if (support.capabilities.maxImageCount > 0 &&
+           imageCount > support.capabilities.maxImageCount) {
+        imageCount = support.capabilities.maxImageCount
+    }
+
+    createInfo := vk.SwapchainCreateInfoKHR{}
+    createInfo.sType = vk.StructureType.SWAPCHAIN_CREATE_INFO_KHR
+    createInfo.surface = surface
+    createInfo.minImageCount = imageCount
+    createInfo.imageFormat = surfaceFormat.format
+    createInfo.imageColorSpace = surfaceFormat.colorSpace
+    createInfo.imageExtent = extent
+    createInfo.imageArrayLayers = 1
+    createInfo.imageUsage = {.COLOR_ATTACHMENT}
+
+    indices := find_queue_families(physicalDevice, surface)
+    queueFamilyIndices := [?]u32{indices.graphicsFamily.(u32), indices.presentFamily.(u32)}
+
+    if (indices.graphicsFamily != indices.presentFamily) {
+        createInfo.imageSharingMode = .CONCURRENT
+        createInfo.queueFamilyIndexCount = 2
+        createInfo.pQueueFamilyIndices = &queueFamilyIndices[0]
+    } else {
+        createInfo.imageSharingMode = .EXCLUSIVE
+        createInfo.queueFamilyIndexCount = 0
+        createInfo.pQueueFamilyIndices = nil
+    }
+
+    createInfo.preTransform = support.capabilities.currentTransform
+    createInfo.compositeAlpha = {.OPAQUE}
+    createInfo.presentMode = presentMode
+    createInfo.clipped = true
+
+    if (vk.CreateSwapchainKHR(device, &createInfo, nil, &swapChain) != .SUCCESS) {
+        log.error("Failed to create swap chain")
+    }
+
+    vk.GetSwapchainImagesKHR(device, swapChain, &imageCount, nil)
+    swapChainImages = make([dynamic]vk.Image, imageCount)
+    vk.GetSwapchainImagesKHR(device, swapChain, &imageCount, &swapChainImages[0])
+
+    return swapChain, swapChainImages, surfaceFormat.format, extent, true
 }
 
 init_vulkan :: proc(window: ^sdl2.Window) -> (handles: VulkanHandles, ok: bool) {
@@ -459,6 +593,8 @@ init_vulkan :: proc(window: ^sdl2.Window) -> (handles: VulkanHandles, ok: bool) 
         physicalDevice,
         handles.surface,
     ) or_return
+    handles.swapChain, handles.swapChainImages, handles.swapChainImageFormat, handles.swapChainExtent =
+        create_swap_chain(window, physicalDevice, handles.device, handles.surface) or_return
 
     return handles, true
 }
@@ -511,6 +647,8 @@ main :: proc() {
         vk.DestroyDebugUtilsMessengerEXT(ctx.instance, ctx.debugMessenger, nil)
     }
 
+    delete(ctx.swapChainImages)
+    vk.DestroySwapchainKHR(ctx.device, ctx.swapChain, nil)
     vk.DestroyDevice(ctx.device, nil)
     vk.DestroySurfaceKHR(ctx.instance, ctx.surface, nil)
     vk.DestroyInstance(ctx.instance, nil)
