@@ -53,6 +53,7 @@ VulkanHandles :: struct {
     debugMessenger:                vk.DebugUtilsMessengerEXT,
     surface:                       vk.SurfaceKHR,
     renderPass:                    vk.RenderPass,
+    frameBuffers:                  [dynamic]vk.Framebuffer,
     using logicalDeviceHandles:    LogicalDeviceHandles,
     using swapChainHandles:        SwapChainHandles,
     using graphicsPipelineHandles: GraphicsPipelineHandles,
@@ -848,6 +849,37 @@ create_graphics_pipeline :: proc(
     return handles, true
 }
 
+create_framebuffers :: proc(
+    swapChainHandles: SwapChainHandles,
+    renderPass: vk.RenderPass,
+    device: vk.Device,
+) -> (
+    frameBuffers: [dynamic]vk.Framebuffer,
+    ok: bool,
+) {
+    frameBuffers = make([dynamic]vk.Framebuffer, len(swapChainHandles.swapChainImageViews))
+
+    for &buffer, i in frameBuffers {
+        attachments := [?]vk.ImageView{swapChainHandles.swapChainImageViews[i]}
+
+        framebufferInfo := vk.FramebufferCreateInfo{}
+        framebufferInfo.sType = .FRAMEBUFFER_CREATE_INFO
+        framebufferInfo.renderPass = renderPass
+        framebufferInfo.attachmentCount = 1
+        framebufferInfo.pAttachments = &attachments[0]
+        framebufferInfo.width = swapChainHandles.swapChainExtent.width
+        framebufferInfo.height = swapChainHandles.swapChainExtent.height
+        framebufferInfo.layers = 1
+
+        if (vk.CreateFramebuffer(device, &framebufferInfo, nil, &buffer) != .SUCCESS) {
+            log.error("Failed to create framebuffer")
+            return
+        }
+    }
+
+    return frameBuffers, true
+}
+
 init_vulkan :: proc(window: ^sdl2.Window) -> (v: VulkanHandles, ok: bool) {
     v.instance = create_vulkan_instance(window) or_return
     v.debugMessenger = setup_debug_messenger(v.instance) or_return
@@ -862,6 +894,7 @@ init_vulkan :: proc(window: ^sdl2.Window) -> (v: VulkanHandles, ok: bool) {
         v.renderPass,
         v.swapChainExtent,
     ) or_return
+    v.frameBuffers = create_framebuffers(v.swapChainHandles, v.renderPass, v.device) or_return
 
     return v, true
 }
@@ -875,8 +908,13 @@ destroy_vulkan :: proc(v: VulkanHandles) {
         vk.DestroyImageView(v.device, imageView, nil)
     }
 
+    for buffer in v.frameBuffers {
+        vk.DestroyFramebuffer(v.device, buffer, nil)
+    }
+
     delete(v.swapChainImages)
     delete(v.swapChainImageViews)
+    delete(v.frameBuffers)
     vk.DestroyPipeline(v.device, v.graphicsPipeline, nil)
     vk.DestroyPipelineLayout(v.device, v.pipelineLayout, nil)
     vk.DestroyRenderPass(v.device, v.renderPass, nil)
