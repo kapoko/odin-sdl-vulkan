@@ -48,6 +48,12 @@ LogicalDeviceHandles :: struct {
     graphicsQueue, presentQueue: vk.Queue,
 }
 
+SyncObjects :: struct {
+    imageAvailableSemaphore: vk.Semaphore,
+    renderFinishedSemaphore: vk.Semaphore,
+    inFlightFence:           vk.Fence,
+}
+
 VulkanHandles :: struct {
     instance:                      vk.Instance,
     debugMessenger:                vk.DebugUtilsMessengerEXT,
@@ -59,6 +65,7 @@ VulkanHandles :: struct {
     using logicalDeviceHandles:    LogicalDeviceHandles,
     using swapChainHandles:        SwapChainHandles,
     using graphicsPipelineHandles: GraphicsPipelineHandles,
+    using syncObjects:             SyncObjects,
 }
 
 CTX :: struct {
@@ -208,9 +215,9 @@ create_vulkan_instance :: proc(window: ^sdl2.Window) -> (instance: vk.Instance, 
 
     for &extension, i in supportedExtensions {
         if runtime.cstring_eq(
-            vk.KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME,
-            cast(cstring)&extension.extensionName[0],
-        ) {
+               vk.KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME,
+               cast(cstring)&extension.extensionName[0],
+           ) {
             append(&extensionNames, vk.KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME)
             createInfo.flags = {vk.InstanceCreateFlag.ENUMERATE_PORTABILITY_KHR}
         }
@@ -686,12 +693,22 @@ create_render_pass :: proc(
     subpass.colorAttachmentCount = 1
     subpass.pColorAttachments = &colorAttachmentRef
 
+    dependency := vk.SubpassDependency{}
+    dependency.srcSubpass = vk.SUBPASS_EXTERNAL
+    dependency.dstSubpass = 0
+    dependency.srcStageMask = {.COLOR_ATTACHMENT_OUTPUT}
+    dependency.srcAccessMask = nil
+    dependency.dstStageMask = {.COLOR_ATTACHMENT_OUTPUT}
+    dependency.dstAccessMask = {.COLOR_ATTACHMENT_WRITE}
+
     renderPassInfo := vk.RenderPassCreateInfo{}
     renderPassInfo.sType = .RENDER_PASS_CREATE_INFO
     renderPassInfo.attachmentCount = 1
     renderPassInfo.pAttachments = &colorAttachment
     renderPassInfo.subpassCount = 1
     renderPassInfo.pSubpasses = &subpass
+    renderPassInfo.dependencyCount = 1
+    renderPassInfo.pDependencies = &dependency
 
     if (vk.CreateRenderPass(device, &renderPassInfo, nil, &renderPass) != .SUCCESS) {
         log.error("Failed to create render pass")
@@ -953,7 +970,7 @@ record_command_buffer :: proc(
     renderPassInfo.renderArea.extent = swapChainHandles.swapChainExtent
 
     clearColor := vk.ClearValue {
-        color = {float32 = {0, 0.5, 0, 1}},
+        color = {float32 = {0, 0, 0, 1}},
     }
     renderPassInfo.clearValueCount = 1
     renderPassInfo.pClearValues = &clearColor
@@ -986,6 +1003,25 @@ record_command_buffer :: proc(
     return true
 }
 
+create_sync_objects :: proc(device: vk.Device) -> (syncObjects: SyncObjects, ok: bool) {
+    semaphoreInfo := vk.SemaphoreCreateInfo{}
+    semaphoreInfo.sType = .SEMAPHORE_CREATE_INFO
+    fenceInfo := vk.FenceCreateInfo{}
+    fenceInfo.sType = .FENCE_CREATE_INFO
+    fenceInfo.flags = {.SIGNALED}
+
+    if (vk.CreateSemaphore(device, &semaphoreInfo, nil, &syncObjects.imageAvailableSemaphore) !=
+               .SUCCESS ||
+           vk.CreateSemaphore(device, &semaphoreInfo, nil, &syncObjects.renderFinishedSemaphore) !=
+               .SUCCESS ||
+           vk.CreateFence(device, &fenceInfo, nil, &syncObjects.inFlightFence) != .SUCCESS) {
+        log.error("Failed to create semaphores")
+        return
+    }
+
+    return syncObjects, true
+}
+
 init_vulkan :: proc(window: ^sdl2.Window) -> (v: VulkanHandles, ok: bool) {
     v.instance = create_vulkan_instance(window) or_return
     v.debugMessenger = setup_debug_messenger(v.instance) or_return
@@ -1003,6 +1039,7 @@ init_vulkan :: proc(window: ^sdl2.Window) -> (v: VulkanHandles, ok: bool) {
     v.frameBuffers = create_framebuffers(v.swapChainHandles, v.renderPass, v.device) or_return
     v.commandPool = create_command_pool(physicalDevice, v.surface, v.device) or_return
     v.commandBuffer = create_command_buffer(v.device, v.commandPool) or_return
+    v.syncObjects = create_sync_objects(v.device) or_return
 
     return v, true
 }
@@ -1023,6 +1060,9 @@ destroy_vulkan :: proc(v: VulkanHandles) {
     delete(v.swapChainImages)
     delete(v.swapChainImageViews)
     delete(v.frameBuffers)
+    vk.DestroySemaphore(v.device, v.imageAvailableSemaphore, nil)
+    vk.DestroySemaphore(v.device, v.renderFinishedSemaphore, nil)
+    vk.DestroyFence(v.device, v.inFlightFence, nil)
     vk.DestroyCommandPool(v.device, v.commandPool, nil)
     vk.DestroyPipeline(v.device, v.graphicsPipeline, nil)
     vk.DestroyPipelineLayout(v.device, v.pipelineLayout, nil)
@@ -1031,6 +1071,63 @@ destroy_vulkan :: proc(v: VulkanHandles) {
     vk.DestroyDevice(v.device, nil)
     vk.DestroySurfaceKHR(v.instance, v.surface, nil)
     vk.DestroyInstance(v.instance, nil)
+}
+
+draw :: proc(v: ^VulkanHandles) {
+    vk.WaitForFences(v.device, 1, &v.inFlightFence, true, max(u64))
+    vk.ResetFences(v.device, 1, &v.inFlightFence)
+
+    imageIndex: u32
+    vk.AcquireNextImageKHR(
+        v.device,
+        v.swapChain,
+        max(u64),
+        v.imageAvailableSemaphore,
+        0,
+        &imageIndex,
+    )
+
+    vk.ResetCommandBuffer(v.commandBuffer, {})
+    record_command_buffer(
+        v.commandBuffer,
+        v.renderPass,
+        v.frameBuffers,
+        v.swapChainHandles,
+        v.graphicsPipeline,
+        imageIndex,
+    )
+
+    submitInfo := vk.SubmitInfo{}
+    submitInfo.sType = .SUBMIT_INFO
+
+    waitSemaphores := [?]vk.Semaphore{v.imageAvailableSemaphore}
+    waitStages: vk.PipelineStageFlags = {.COLOR_ATTACHMENT_OUTPUT}
+    submitInfo.waitSemaphoreCount = 1
+    submitInfo.pWaitSemaphores = &waitSemaphores[0]
+    submitInfo.pWaitDstStageMask = &waitStages
+    submitInfo.commandBufferCount = 1
+    submitInfo.pCommandBuffers = &v.commandBuffer
+
+    signalSemaphores := [?]vk.Semaphore{v.renderFinishedSemaphore}
+    submitInfo.signalSemaphoreCount = 1
+    submitInfo.pSignalSemaphores = &signalSemaphores[0]
+
+    if (vk.QueueSubmit(v.graphicsQueue, 1, &submitInfo, v.inFlightFence) != .SUCCESS) {
+        log.error("Failed to submit draw command buffer")
+    }
+
+    presentInfo := vk.PresentInfoKHR{}
+    presentInfo.sType = .PRESENT_INFO_KHR
+    presentInfo.waitSemaphoreCount = 1
+    presentInfo.pWaitSemaphores = &signalSemaphores[0]
+
+    swapChains := [?]vk.SwapchainKHR{v.swapChain}
+    presentInfo.swapchainCount = 1
+    presentInfo.pSwapchains = &swapChains[0]
+    presentInfo.pImageIndices = &imageIndex
+    presentInfo.pResults = nil
+
+    vk.QueuePresentKHR(v.presentQueue, &presentInfo)
 }
 
 main :: proc() {
@@ -1077,6 +1174,8 @@ main :: proc() {
                 if e.key.keysym.sym == .ESCAPE do shouldClose = true
             }
         }
+
+        draw(&ctx.vulkanHandles)
     }
 
     destroy_vulkan(ctx.vulkanHandles)
