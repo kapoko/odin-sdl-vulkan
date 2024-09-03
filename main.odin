@@ -613,6 +613,60 @@ create_image_views :: proc(device: vk.Device, handles: ^SwapChainHandles) -> boo
     return true
 }
 
+read_file :: proc(path: string) -> (data: []byte, ok: bool) {
+    data, ok = os.read_entire_file_from_filename(path)
+
+    return
+}
+
+create_shader_module :: proc(
+    device: vk.Device,
+    code: []byte,
+) -> (
+    shaderModule: vk.ShaderModule,
+    ok: bool,
+) {
+    createInfo := vk.ShaderModuleCreateInfo{}
+    createInfo.sType = vk.StructureType.SHADER_MODULE_CREATE_INFO
+    createInfo.codeSize = len(code)
+    createInfo.pCode = cast(^u32)&code[0]
+
+    if (vk.CreateShaderModule(device, &createInfo, nil, &shaderModule) != .SUCCESS) {
+        log.error("Failed to create shader module")
+        return
+    }
+
+    return shaderModule, true
+}
+
+create_graphics_pipeline :: proc(device: vk.Device) -> bool {
+    vertShaderCode := read_file("shaders/vert.spv") or_return
+    fragShaderCode := read_file("shaders/frag.spv") or_return
+    defer delete(vertShaderCode)
+    defer delete(fragShaderCode)
+
+    vertShaderModule := create_shader_module(device, vertShaderCode) or_return
+    fragShaderModule := create_shader_module(device, fragShaderCode) or_return
+
+    vertShaderStageInfo := vk.PipelineShaderStageCreateInfo{}
+    vertShaderStageInfo.sType = .PIPELINE_SHADER_STAGE_CREATE_INFO
+    vertShaderStageInfo.stage = {.VERTEX}
+    vertShaderStageInfo.module = vertShaderModule
+    vertShaderStageInfo.pName = "main"
+
+    fragShaderStageInfo := vk.PipelineShaderStageCreateInfo{}
+    fragShaderStageInfo.sType = .PIPELINE_SHADER_STAGE_CREATE_INFO
+    fragShaderStageInfo.stage = {.FRAGMENT}
+    fragShaderStageInfo.module = fragShaderModule
+    fragShaderStageInfo.pName = "main"
+
+    shaderStages := [?]vk.PipelineShaderStageCreateInfo{vertShaderStageInfo, fragShaderStageInfo}
+
+    vk.DestroyShaderModule(device, fragShaderModule, nil)
+    vk.DestroyShaderModule(device, vertShaderModule, nil)
+    return true
+}
+
 init_vulkan :: proc(window: ^sdl2.Window) -> (handles: VulkanHandles, ok: bool) {
     // Load addresses of vulkan addresses
     getInstanceProcAddr := sdl2.Vulkan_GetVkGetInstanceProcAddr()
@@ -633,6 +687,7 @@ init_vulkan :: proc(window: ^sdl2.Window) -> (handles: VulkanHandles, ok: bool) 
         handles.surface,
     ) or_return
     create_image_views(handles.device, &handles.swapChainHandles) or_return
+    create_graphics_pipeline(handles.device)
 
     return handles, true
 }

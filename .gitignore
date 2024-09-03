@@ -1,3 +1,4 @@
 .DS_Store
 odin-vulkan
 odin-vulkan.dSYM
+*.spv
