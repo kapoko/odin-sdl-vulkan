@@ -48,6 +48,7 @@ VulkanHandles :: struct {
     debugMessenger:             vk.DebugUtilsMessengerEXT,
     surface:                    vk.SurfaceKHR,
     pipelineLayout:             vk.PipelineLayout,
+    renderPass:                 vk.RenderPass,
     using logicalDeviceHandles: LogicalDeviceHandles,
     using swapChainHandles:     SwapChainHandles,
 }
@@ -162,6 +163,12 @@ populate_debug_create_info :: proc(
 }
 
 create_vulkan_instance :: proc(window: ^sdl2.Window) -> (instance: vk.Instance, ok: bool) {
+    // Load addresses of vulkan addresses
+    getInstanceProcAddr := sdl2.Vulkan_GetVkGetInstanceProcAddr()
+    assert(getInstanceProcAddr != nil)
+    vk.load_proc_addresses_global(getInstanceProcAddr)
+    assert(vk.CreateInstance != nil)
+
     if (ENABLE_VALIDATION_LAYERS && !check_validation_layer_support()) {
         log.error("Validation layers requested, but not available")
     }
@@ -585,8 +592,14 @@ create_swap_chain :: proc(
     return result, true
 }
 
-create_image_views :: proc(device: vk.Device, handles: ^SwapChainHandles) -> bool {
-    handles.swapChainImageViews = make([dynamic]vk.ImageView, len(handles.swapChainImages))
+create_image_views :: proc(
+    device: vk.Device,
+    handles: SwapChainHandles,
+) -> (
+    imageViews: [dynamic]vk.ImageView,
+    ok: bool,
+) {
+    imageViews = make([dynamic]vk.ImageView, len(handles.swapChainImages))
 
     for image, i in handles.swapChainImages {
         createInfo := vk.ImageViewCreateInfo{}
@@ -604,14 +617,13 @@ create_image_views :: proc(device: vk.Device, handles: ^SwapChainHandles) -> boo
         createInfo.subresourceRange.baseArrayLayer = 0
         createInfo.subresourceRange.layerCount = 1
 
-        if (vk.CreateImageView(device, &createInfo, nil, &handles.swapChainImageViews[i]) !=
-               .SUCCESS) {
+        if (vk.CreateImageView(device, &createInfo, nil, &imageViews[i]) != .SUCCESS) {
             log.errorf("Failed to create image view %v/%v!", i, len(handles.swapChainImageViews))
-            return false
+            return
         }
     }
 
-    return true
+    return imageViews, true
 }
 
 read_file :: proc(path: string) -> (data: []byte, ok: bool) {
@@ -766,52 +778,78 @@ create_graphics_pipeline :: proc(
     return pipelineLayout, true
 }
 
-init_vulkan :: proc(window: ^sdl2.Window) -> (handles: VulkanHandles, ok: bool) {
-    // Load addresses of vulkan addresses
-    getInstanceProcAddr := sdl2.Vulkan_GetVkGetInstanceProcAddr()
-    assert(getInstanceProcAddr != nil)
-    vk.load_proc_addresses_global(getInstanceProcAddr)
-    assert(vk.CreateInstance != nil)
+create_render_pass :: proc(
+    device: vk.Device,
+    swapChainImageFormat: vk.Format,
+) -> (
+    renderPass: vk.RenderPass,
+    ok: bool,
+) {
+    colorAttachment := vk.AttachmentDescription{}
+    colorAttachment.format = swapChainImageFormat
+    colorAttachment.samples = {._1}
+    colorAttachment.loadOp = .CLEAR
+    colorAttachment.storeOp = .STORE
+    colorAttachment.stencilLoadOp = .DONT_CARE
+    colorAttachment.stencilStoreOp = .DONT_CARE
+    colorAttachment.initialLayout = .UNDEFINED
+    colorAttachment.finalLayout = .PRESENT_SRC_KHR
 
-    // Here we go
-    handles.instance = create_vulkan_instance(window) or_return
-    handles.debugMessenger = setup_debug_messenger(
-        handles.instance,
-    ) or_return
-    handles.surface = create_surface(window, handles.instance) or_return
-    physicalDevice := pick_physical_device(handles.instance, handles.surface) or_return
-    handles.logicalDeviceHandles = create_logical_device(physicalDevice, handles.surface) or_return
-    handles.swapChainHandles = create_swap_chain(
-        window,
-        physicalDevice,
-        handles.device,
-        handles.surface,
-    ) or_return
-    create_image_views(handles.device, &handles.swapChainHandles) or_return
-    handles.pipelineLayout = create_graphics_pipeline(
-        handles.device,
-        handles.swapChainExtent,
-    ) or_return
+    colorAttachmentRef := vk.AttachmentReference{}
+    colorAttachmentRef.attachment = 0
+    colorAttachmentRef.layout = .COLOR_ATTACHMENT_OPTIMAL
 
-    return handles, true
+    subpass := vk.SubpassDescription{}
+    subpass.pipelineBindPoint = .GRAPHICS
+    subpass.colorAttachmentCount = 1
+    subpass.pColorAttachments = &colorAttachmentRef
+
+    renderPassInfo := vk.RenderPassCreateInfo{}
+    renderPassInfo.sType = .RENDER_PASS_CREATE_INFO
+    renderPassInfo.attachmentCount = 1
+    renderPassInfo.pAttachments = &colorAttachment
+    renderPassInfo.subpassCount = 1
+    renderPassInfo.pSubpasses = &subpass
+
+    if (vk.CreateRenderPass(device, &renderPassInfo, nil, &renderPass) != .SUCCESS) {
+        log.error("Failed to create render pass")
+        return
+    }
+
+    return renderPass, true
 }
 
-destroy_vulkan :: proc(handles: VulkanHandles) {
+init_vulkan :: proc(window: ^sdl2.Window) -> (v: VulkanHandles, ok: bool) {
+    v.instance = create_vulkan_instance(window) or_return
+    v.debugMessenger = setup_debug_messenger(v.instance) or_return
+    v.surface = create_surface(window, v.instance) or_return
+    physicalDevice := pick_physical_device(v.instance, v.surface) or_return
+    v.logicalDeviceHandles = create_logical_device(physicalDevice, v.surface) or_return
+    v.swapChainHandles = create_swap_chain(window, physicalDevice, v.device, v.surface) or_return
+    v.swapChainImageViews = create_image_views(v.device, v.swapChainHandles) or_return
+    v.renderPass = create_render_pass(v.device, v.swapChainImageFormat) or_return
+    v.pipelineLayout = create_graphics_pipeline(v.device, v.swapChainExtent) or_return
+
+    return v, true
+}
+
+destroy_vulkan :: proc(v: VulkanHandles) {
     if ENABLE_VALIDATION_LAYERS {
-        vk.DestroyDebugUtilsMessengerEXT(handles.instance, handles.debugMessenger, nil)
+        vk.DestroyDebugUtilsMessengerEXT(v.instance, v.debugMessenger, nil)
     }
 
-    for imageView in handles.swapChainImageViews {
-        vk.DestroyImageView(handles.device, imageView, nil)
+    for imageView in v.swapChainImageViews {
+        vk.DestroyImageView(v.device, imageView, nil)
     }
 
-    delete(handles.swapChainImages)
-    delete(handles.swapChainImageViews)
-    vk.DestroyPipelineLayout(handles.device, handles.pipelineLayout, nil)
-    vk.DestroySwapchainKHR(handles.device, handles.swapChain, nil)
-    vk.DestroyDevice(handles.device, nil)
-    vk.DestroySurfaceKHR(handles.instance, handles.surface, nil)
-    vk.DestroyInstance(handles.instance, nil)
+    delete(v.swapChainImages)
+    delete(v.swapChainImageViews)
+    vk.DestroyPipelineLayout(v.device, v.pipelineLayout, nil)
+    vk.DestroyRenderPass(v.device, v.renderPass, nil)
+    vk.DestroySwapchainKHR(v.device, v.swapChain, nil)
+    vk.DestroyDevice(v.device, nil)
+    vk.DestroySurfaceKHR(v.instance, v.surface, nil)
+    vk.DestroyInstance(v.instance, nil)
 }
 
 main :: proc() {
