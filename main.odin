@@ -27,17 +27,17 @@ QueueFamilyIndices :: struct {
 
 SwapChainSupportDetails :: struct {
     capabilities: vk.SurfaceCapabilitiesKHR,
-    formats:      [dynamic]vk.SurfaceFormatKHR,
-    presentModes: [dynamic]vk.PresentModeKHR,
+    formats:      []vk.SurfaceFormatKHR,
+    presentModes: []vk.PresentModeKHR,
 }
 
 Swapchain :: struct {
     handle:       vk.SwapchainKHR,
-    images:       [dynamic]vk.Image,
-    imageViews:   [dynamic]vk.ImageView,
+    images:       []vk.Image,
+    imageViews:   []vk.ImageView,
     imageFormat:  vk.Format,
     extent:       vk.Extent2D,
-    framebuffers: [dynamic]vk.Framebuffer,
+    framebuffers: []vk.Framebuffer,
 }
 
 GraphicsPipelineHandles :: struct {
@@ -142,7 +142,7 @@ check_validation_layer_support :: proc() -> bool {
         return false
     }
 
-    availableLayers := make([dynamic]vk.LayerProperties, layerCount)
+    availableLayers := make([]vk.LayerProperties, layerCount)
     defer delete(availableLayers)
     vk.EnumerateInstanceLayerProperties(&layerCount, &availableLayers[0])
 
@@ -243,7 +243,6 @@ create_vulkan_instance :: proc(window: ^sdl2.Window) -> (instance: vk.Instance, 
             append(&extensionNames, vk.KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME)
             createInfo.flags = {vk.InstanceCreateFlag.ENUMERATE_PORTABILITY_KHR}
         }
-        if ODIN_DEBUG do log.infof("%v:\t%s", i + 1, extension.extensionName)
     }
 
     createInfo.sType = .INSTANCE_CREATE_INFO
@@ -310,7 +309,7 @@ find_queue_families :: proc(
         return
     }
 
-    queueFamilies := make([dynamic]vk.QueueFamilyProperties, queueFamilyCount)
+    queueFamilies := make([]vk.QueueFamilyProperties, queueFamilyCount)
     defer delete(queueFamilies)
     vk.GetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, &queueFamilies[0])
     for queueFamily, i in queueFamilies {
@@ -351,7 +350,7 @@ create_surface :: proc(
 check_device_extension_support :: proc(device: vk.PhysicalDevice) -> bool {
     extensionCount: u32
     vk.EnumerateDeviceExtensionProperties(device, nil, &extensionCount, nil)
-    availableExtensions := make([dynamic]vk.ExtensionProperties, extensionCount)
+    availableExtensions := make([]vk.ExtensionProperties, extensionCount)
     defer delete(availableExtensions)
     vk.EnumerateDeviceExtensionProperties(device, nil, &extensionCount, &availableExtensions[0])
 
@@ -378,14 +377,14 @@ query_swap_chain_support :: proc(
     formatCount: u32
     vk.GetPhysicalDeviceSurfaceFormatsKHR(device, surface, &formatCount, nil)
     if (formatCount != 0) {
-        details.formats = make([dynamic]vk.SurfaceFormatKHR, formatCount)
+        details.formats = make([]vk.SurfaceFormatKHR, formatCount)
         vk.GetPhysicalDeviceSurfaceFormatsKHR(device, surface, &formatCount, &details.formats[0])
     }
 
     presentModeCount: u32
     vk.GetPhysicalDeviceSurfacePresentModesKHR(device, surface, &presentModeCount, nil)
     if (presentModeCount != 0) {
-        details.presentModes = make([dynamic]vk.PresentModeKHR, presentModeCount)
+        details.presentModes = make([]vk.PresentModeKHR, presentModeCount)
         vk.GetPhysicalDeviceSurfacePresentModesKHR(
             device,
             surface,
@@ -403,7 +402,7 @@ destroy_swap_chain_support :: proc(support: SwapChainSupportDetails) {
 }
 
 choose_swap_surface_format :: proc(
-    availableFormats: [dynamic]vk.SurfaceFormatKHR,
+    availableFormats: []vk.SurfaceFormatKHR,
 ) -> vk.SurfaceFormatKHR {
     for availableFormat in availableFormats {
         if (availableFormat.format == vk.Format.B8G8R8A8_SRGB &&
@@ -416,9 +415,7 @@ choose_swap_surface_format :: proc(
     return availableFormats[0]
 }
 
-choose_swap_present_mode :: proc(
-    availablePresentModes: [dynamic]vk.PresentModeKHR,
-) -> vk.PresentModeKHR {
+choose_swap_present_mode :: proc(availablePresentModes: []vk.PresentModeKHR) -> vk.PresentModeKHR {
 
     for availablePresentMode in availablePresentModes {
         if (availablePresentMode == vk.PresentModeKHR.MAILBOX) {
@@ -492,7 +489,7 @@ pick_physical_device :: proc(
         return
     }
 
-    devices := make([dynamic]vk.PhysicalDevice, deviceCount)
+    devices := make([]vk.PhysicalDevice, deviceCount)
     defer delete(devices)
     vk.EnumeratePhysicalDevices(instance, &deviceCount, &devices[0])
 
@@ -622,7 +619,7 @@ create_swap_chain :: proc(
     }
 
     vk.GetSwapchainImagesKHR(device, swapchain.handle, &imageCount, nil)
-    swapchain.images = make([dynamic]vk.Image, imageCount)
+    swapchain.images = make([]vk.Image, imageCount)
     vk.GetSwapchainImagesKHR(device, swapchain.handle, &imageCount, &swapchain.images[0])
 
     swapchain.imageFormat = surfaceFormat.format
@@ -654,7 +651,7 @@ recreate_swapchain :: proc(window: ^sdl2.Window, v: ^VulkanHandles) -> (ok: bool
     v.swapchain.imageViews = create_image_views(v.device, v.swapchain) or_return
     v.swapchain.framebuffers = create_framebuffers(v.swapchain, v.renderPass, v.device) or_return
 
-    cleanup_swapchain(v.device,oldSwapchain)
+    cleanup_swapchain(v.device, oldSwapchain)
 
     return true
 }
@@ -663,10 +660,10 @@ create_image_views :: proc(
     device: vk.Device,
     swapchain: Swapchain,
 ) -> (
-    imageViews: [dynamic]vk.ImageView,
+    imageViews: []vk.ImageView,
     ok: bool,
 ) {
-    imageViews = make([dynamic]vk.ImageView, len(swapchain.images))
+    imageViews = make([]vk.ImageView, len(swapchain.images))
 
     for image, i in swapchain.images {
         createInfo := vk.ImageViewCreateInfo{}
@@ -925,10 +922,10 @@ create_framebuffers :: proc(
     renderPass: vk.RenderPass,
     device: vk.Device,
 ) -> (
-    framebuffers: [dynamic]vk.Framebuffer,
+    framebuffers: []vk.Framebuffer,
     ok: bool,
 ) {
-    framebuffers = make([dynamic]vk.Framebuffer, len(swapchain.imageViews))
+    framebuffers = make([]vk.Framebuffer, len(swapchain.imageViews))
 
     for &buffer, i in framebuffers {
         attachments := [?]vk.ImageView{swapchain.imageViews[i]}
