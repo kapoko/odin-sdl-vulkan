@@ -77,10 +77,6 @@ CTX :: struct {
     using vulkanHandles: VulkanHandles,
 }
 
-is_queue_family_complete :: proc(q: QueueFamilyIndices) -> bool {
-    return q.graphicsFamily != nil && q.presentFamily != nil
-}
-
 init_window :: proc(framebufferResized: ^bool) -> (window: ^sdl2.Window, ok: bool) {
     if sdl_res := sdl2.Init(sdl2.INIT_VIDEO); sdl_res < 0 {
         log.errorf("sdl2.init returned %v.", sdl_res)
@@ -292,6 +288,10 @@ setup_debug_messenger :: proc(
     }
 
     return debugMessenger, true
+}
+
+is_queue_family_complete :: proc(q: QueueFamilyIndices) -> bool {
+    return q.graphicsFamily != nil && q.presentFamily != nil
 }
 
 find_queue_families :: proc(
