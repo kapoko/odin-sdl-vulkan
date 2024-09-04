@@ -1,4 +1,4 @@
-# odin-vulkan
+# odin-sdl-vulkan
 
 ![screenshot](screenshot.png "Screenshot")
 
