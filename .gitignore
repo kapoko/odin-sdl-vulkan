@@ -1,4 +1,4 @@
 .DS_Store
-odin-vulkan
-odin-vulkan.dSYM
+odin-sdl-vulkan
+odin-sdl-vulkan.dSYM
 *.spv

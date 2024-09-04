@@ -10,7 +10,7 @@ import "core:strings"
 import "vendor:sdl2"
 import vk "vendor:vulkan"
 
-WINDOW_TITLE :: "Vulkan SDL"
+WINDOW_TITLE :: "Odin SDL Vulkan"
 VIEW_WIDTH :: 640
 VIEW_HEIGHT :: 480
 WINDOW_FLAGS :: sdl2.WindowFlags{.SHOWN, .ALLOW_HIGHDPI, .VULKAN, .RESIZABLE}
@@ -237,9 +237,9 @@ create_vulkan_instance :: proc(window: ^sdl2.Window) -> (instance: vk.Instance, 
 
     for &extension, i in supportedExtensions {
         if runtime.cstring_eq(
-               vk.KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME,
-               cast(cstring)&extension.extensionName[0],
-           ) {
+            vk.KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME,
+            cast(cstring)&extension.extensionName[0],
+        ) {
             append(&extensionNames, vk.KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME)
             createInfo.flags = {vk.InstanceCreateFlag.ENUMERATE_PORTABILITY_KHR}
         }
