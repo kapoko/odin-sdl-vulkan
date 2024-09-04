@@ -31,12 +31,13 @@ SwapChainSupportDetails :: struct {
     presentModes: [dynamic]vk.PresentModeKHR,
 }
 
-SwapChainHandles :: struct {
-    swapChain:            vk.SwapchainKHR,
-    swapChainImages:      [dynamic]vk.Image,
-    swapChainImageViews:  [dynamic]vk.ImageView,
-    swapChainImageFormat: vk.Format,
-    swapChainExtent:      vk.Extent2D,
+Swapchain :: struct {
+    handle:       vk.SwapchainKHR,
+    images:       [dynamic]vk.Image,
+    imageViews:   [dynamic]vk.ImageView,
+    imageFormat:  vk.Format,
+    extent:       vk.Extent2D,
+    framebuffers: [dynamic]vk.Framebuffer,
 }
 
 GraphicsPipelineHandles :: struct {
@@ -60,13 +61,12 @@ VulkanHandles :: struct {
     debugMessenger:                vk.DebugUtilsMessengerEXT,
     surface:                       vk.SurfaceKHR,
     renderPass:                    vk.RenderPass,
-    framebuffers:                  [dynamic]vk.Framebuffer,
     commandPool:                   vk.CommandPool,
     commandBuffers:                [MAX_FRAMES_IN_FLIGHT]vk.CommandBuffer,
     syncObjects:                   [MAX_FRAMES_IN_FLIGHT]SyncObjects,
     physicalDevice:                vk.PhysicalDevice,
+    swapchain:                     Swapchain,
     using logicalDeviceHandles:    LogicalDeviceHandles,
-    using swapChainHandles:        SwapChainHandles,
     using graphicsPipelineHandles: GraphicsPipelineHandles,
 }
 
@@ -570,8 +570,9 @@ create_swap_chain :: proc(
     physicalDevice: vk.PhysicalDevice,
     device: vk.Device,
     surface: vk.SurfaceKHR,
+    oldSwapchain: vk.SwapchainKHR = 0,
 ) -> (
-    result: SwapChainHandles,
+    swapchain: Swapchain,
     ok: bool,
 ) {
     support := query_swap_chain_support(physicalDevice, surface)
@@ -596,7 +597,7 @@ create_swap_chain :: proc(
     createInfo.imageExtent = extent
     createInfo.imageArrayLayers = 1
     createInfo.imageUsage = {.COLOR_ATTACHMENT}
-    createInfo.oldSwapchain = 0
+    createInfo.oldSwapchain = oldSwapchain
 
     indices := find_queue_families(physicalDevice, surface)
     queueFamilyIndices := [?]u32{indices.graphicsFamily.(u32), indices.presentFamily.(u32)}
@@ -616,18 +617,18 @@ create_swap_chain :: proc(
     createInfo.presentMode = presentMode
     createInfo.clipped = true
 
-    if (vk.CreateSwapchainKHR(device, &createInfo, nil, &result.swapChain) != .SUCCESS) {
+    if (vk.CreateSwapchainKHR(device, &createInfo, nil, &swapchain.handle) != .SUCCESS) {
         log.error("Failed to create swap chain")
     }
 
-    vk.GetSwapchainImagesKHR(device, result.swapChain, &imageCount, nil)
-    result.swapChainImages = make([dynamic]vk.Image, imageCount)
-    vk.GetSwapchainImagesKHR(device, result.swapChain, &imageCount, &result.swapChainImages[0])
+    vk.GetSwapchainImagesKHR(device, swapchain.handle, &imageCount, nil)
+    swapchain.images = make([dynamic]vk.Image, imageCount)
+    vk.GetSwapchainImagesKHR(device, swapchain.handle, &imageCount, &swapchain.images[0])
 
-    result.swapChainImageFormat = surfaceFormat.format
-    result.swapChainExtent = extent
+    swapchain.imageFormat = surfaceFormat.format
+    swapchain.extent = extent
 
-    return result, true
+    return swapchain, true
 }
 
 recreate_swapchain :: proc(window: ^sdl2.Window, v: ^VulkanHandles) -> (ok: bool) {
@@ -641,31 +642,38 @@ recreate_swapchain :: proc(window: ^sdl2.Window, v: ^VulkanHandles) -> (ok: bool
 
     vk.DeviceWaitIdle(v.device)
 
-    v.swapChainHandles = create_swap_chain(window, v.physicalDevice, v.device, v.surface) or_return
-    v.swapChainHandles.swapChainImageViews = create_image_views(
+    oldSwapchain := v.swapchain
+
+    v.swapchain = create_swap_chain(
+        window,
+        v.physicalDevice,
         v.device,
-        v.swapChainHandles,
+        v.surface,
+        v.swapchain.handle,
     ) or_return
-    v.framebuffers = create_framebuffers(v.swapChainHandles, v.renderPass, v.device) or_return
+    v.swapchain.imageViews = create_image_views(v.device, v.swapchain) or_return
+    v.swapchain.framebuffers = create_framebuffers(v.swapchain, v.renderPass, v.device) or_return
+
+    cleanup_swapchain(v.device,oldSwapchain)
 
     return true
 }
 
 create_image_views :: proc(
     device: vk.Device,
-    handles: SwapChainHandles,
+    swapchain: Swapchain,
 ) -> (
     imageViews: [dynamic]vk.ImageView,
     ok: bool,
 ) {
-    imageViews = make([dynamic]vk.ImageView, len(handles.swapChainImages))
+    imageViews = make([dynamic]vk.ImageView, len(swapchain.images))
 
-    for image, i in handles.swapChainImages {
+    for image, i in swapchain.images {
         createInfo := vk.ImageViewCreateInfo{}
         createInfo.sType = vk.StructureType.IMAGE_VIEW_CREATE_INFO
         createInfo.image = image
         createInfo.viewType = vk.ImageViewType.D2
-        createInfo.format = handles.swapChainImageFormat
+        createInfo.format = swapchain.imageFormat
         createInfo.components.r = vk.ComponentSwizzle.IDENTITY
         createInfo.components.g = vk.ComponentSwizzle.IDENTITY
         createInfo.components.b = vk.ComponentSwizzle.IDENTITY
@@ -677,7 +685,7 @@ create_image_views :: proc(
         createInfo.subresourceRange.layerCount = 1
 
         if (vk.CreateImageView(device, &createInfo, nil, &imageViews[i]) != .SUCCESS) {
-            log.errorf("Failed to create image view %v/%v!", i, len(handles.swapChainImageViews))
+            log.errorf("Failed to create image view %v/%v!", i, len(swapchain.imageViews))
             return
         }
     }
@@ -913,25 +921,25 @@ create_graphics_pipeline :: proc(
 }
 
 create_framebuffers :: proc(
-    swapChainHandles: SwapChainHandles,
+    swapchain: Swapchain,
     renderPass: vk.RenderPass,
     device: vk.Device,
 ) -> (
     framebuffers: [dynamic]vk.Framebuffer,
     ok: bool,
 ) {
-    framebuffers = make([dynamic]vk.Framebuffer, len(swapChainHandles.swapChainImageViews))
+    framebuffers = make([dynamic]vk.Framebuffer, len(swapchain.imageViews))
 
     for &buffer, i in framebuffers {
-        attachments := [?]vk.ImageView{swapChainHandles.swapChainImageViews[i]}
+        attachments := [?]vk.ImageView{swapchain.imageViews[i]}
 
         framebufferInfo := vk.FramebufferCreateInfo{}
         framebufferInfo.sType = .FRAMEBUFFER_CREATE_INFO
         framebufferInfo.renderPass = renderPass
         framebufferInfo.attachmentCount = 1
         framebufferInfo.pAttachments = &attachments[0]
-        framebufferInfo.width = swapChainHandles.swapChainExtent.width
-        framebufferInfo.height = swapChainHandles.swapChainExtent.height
+        framebufferInfo.width = swapchain.extent.width
+        framebufferInfo.height = swapchain.extent.height
         framebufferInfo.layers = 1
 
         if (vk.CreateFramebuffer(device, &framebufferInfo, nil, &buffer) != .SUCCESS) {
@@ -989,8 +997,7 @@ create_command_buffers :: proc(
 record_command_buffer :: proc(
     commandBuffer: vk.CommandBuffer,
     renderPass: vk.RenderPass,
-    framebuffers: [dynamic]vk.Framebuffer,
-    swapChainHandles: SwapChainHandles,
+    swapchain: Swapchain,
     graphicsPipeline: vk.Pipeline,
     imageIndex: u32,
 ) -> (
@@ -1009,9 +1016,9 @@ record_command_buffer :: proc(
     renderPassInfo := vk.RenderPassBeginInfo{}
     renderPassInfo.sType = .RENDER_PASS_BEGIN_INFO
     renderPassInfo.renderPass = renderPass
-    renderPassInfo.framebuffer = framebuffers[imageIndex]
+    renderPassInfo.framebuffer = swapchain.framebuffers[imageIndex]
     renderPassInfo.renderArea.offset = {0, 0}
-    renderPassInfo.renderArea.extent = swapChainHandles.swapChainExtent
+    renderPassInfo.renderArea.extent = swapchain.extent
 
     clearColor := vk.ClearValue {
         color = {float32 = {0, 0, 0, 1}},
@@ -1026,15 +1033,15 @@ record_command_buffer :: proc(
     viewport := vk.Viewport{}
     viewport.x = 0
     viewport.y = 0
-    viewport.width = f32(swapChainHandles.swapChainExtent.width)
-    viewport.height = f32(swapChainHandles.swapChainExtent.height)
+    viewport.width = f32(swapchain.extent.width)
+    viewport.height = f32(swapchain.extent.height)
     viewport.minDepth = 0
     viewport.maxDepth = 1
     vk.CmdSetViewport(commandBuffer, 0, 1, &viewport)
 
     scissor := vk.Rect2D{}
     scissor.offset = {0, 0}
-    scissor.extent = swapChainHandles.swapChainExtent
+    scissor.extent = swapchain.extent
     vk.CmdSetScissor(commandBuffer, 0, 1, &scissor)
 
     vk.CmdDraw(commandBuffer, 3, 1, 0, 0)
@@ -1091,15 +1098,15 @@ init_vulkan :: proc(window: ^sdl2.Window) -> (v: VulkanHandles, ok: bool) {
     v.surface = create_surface(window, v.instance) or_return
     v.physicalDevice = pick_physical_device(v.instance, v.surface) or_return
     v.logicalDeviceHandles = create_logical_device(v.physicalDevice, v.surface) or_return
-    v.swapChainHandles = create_swap_chain(window, v.physicalDevice, v.device, v.surface) or_return
-    v.swapChainImageViews = create_image_views(v.device, v.swapChainHandles) or_return
-    v.renderPass = create_render_pass(v.device, v.swapChainImageFormat) or_return
+    v.swapchain = create_swap_chain(window, v.physicalDevice, v.device, v.surface) or_return
+    v.swapchain.imageViews = create_image_views(v.device, v.swapchain) or_return
+    v.renderPass = create_render_pass(v.device, v.swapchain.imageFormat) or_return
     v.graphicsPipelineHandles = create_graphics_pipeline(
         v.device,
         v.renderPass,
-        v.swapChainExtent,
+        v.swapchain.extent,
     ) or_return
-    v.framebuffers = create_framebuffers(v.swapChainHandles, v.renderPass, v.device) or_return
+    v.swapchain.framebuffers = create_framebuffers(v.swapchain, v.renderPass, v.device) or_return
     v.commandPool = create_command_pool(v.physicalDevice, v.surface, v.device) or_return
     v.commandBuffers = create_command_buffers(v.device, v.commandPool) or_return
     v.syncObjects = create_sync_objects(v.device) or_return
@@ -1107,28 +1114,23 @@ init_vulkan :: proc(window: ^sdl2.Window) -> (v: VulkanHandles, ok: bool) {
     return v, true
 }
 
-cleanup_swapchain :: proc(
-    device: vk.Device,
-    s: SwapChainHandles,
-    framebuffers: [dynamic]vk.Framebuffer,
-) {
-
-    for buffer in framebuffers {
+cleanup_swapchain :: proc(device: vk.Device, s: Swapchain) {
+    for buffer in s.framebuffers {
         vk.DestroyFramebuffer(device, buffer, nil)
     }
 
-    for imageView in s.swapChainImageViews {
+    for imageView in s.imageViews {
         vk.DestroyImageView(device, imageView, nil)
     }
 
-    delete(s.swapChainImages)
-    delete(s.swapChainImageViews)
-    delete(framebuffers)
-    vk.DestroySwapchainKHR(device, s.swapChain, nil)
+    delete(s.images)
+    delete(s.imageViews)
+    delete(s.framebuffers)
+    vk.DestroySwapchainKHR(device, s.handle, nil)
 }
 
 destroy_vulkan :: proc(v: VulkanHandles) {
-    cleanup_swapchain(v.device, v.swapChainHandles, v.framebuffers)
+    cleanup_swapchain(v.device, v.swapchain)
     vk.DestroyPipeline(v.device, v.graphicsPipeline, nil)
     vk.DestroyPipelineLayout(v.device, v.pipelineLayout, nil)
     vk.DestroyRenderPass(v.device, v.renderPass, nil)
@@ -1166,7 +1168,7 @@ draw :: proc(
     imageIndex: u32
     res := vk.AcquireNextImageKHR(
         v.device,
-        v.swapChain,
+        v.swapchain.handle,
         max(u64),
         sync.imageAvailableSemaphore,
         0,
@@ -1186,8 +1188,7 @@ draw :: proc(
     record_command_buffer(
         v.commandBuffers[currentFrame^],
         v.renderPass,
-        v.framebuffers,
-        v.swapChainHandles,
+        v.swapchain,
         v.graphicsPipeline,
         imageIndex,
     )
@@ -1216,7 +1217,7 @@ draw :: proc(
     presentInfo.waitSemaphoreCount = 1
     presentInfo.pWaitSemaphores = &signalSemaphores[0]
 
-    swapChains := [?]vk.SwapchainKHR{v.swapChain}
+    swapChains := [?]vk.SwapchainKHR{v.swapchain.handle}
     presentInfo.swapchainCount = 1
     presentInfo.pSwapchains = &swapChains[0]
     presentInfo.pImageIndices = &imageIndex
